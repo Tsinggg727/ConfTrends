@@ -8,7 +8,7 @@
 import json
 import uuid
 
-from db import execute, query_all, query_one
+from db import execute, execute_many, query_all, query_one
 
 
 def _now():
@@ -30,8 +30,14 @@ def conference_info(code):
 # ---------------------------------------------------------------
 _TASK_FIELDS = {
     "status", "stage", "total", "finished", "success", "failed",
-    "skipped", "cursor", "started_at", "finished_at",
+    "skipped", "cursor", "started_at", "finished_at", "pause_reason",
 }
+
+# 可以自增的计数字段
+_COUNTER_FIELDS = {"finished", "success", "failed", "skipped"}
+
+# 「没跑完」的状态：这些任务上的明细还能续跑，也还在占着这个会议-年份
+_ACTIVE_STATUSES = ("queued", "running", "paused")
 
 
 def create_task(task_type, conference_code, year, auto_commit, total):
@@ -82,6 +88,76 @@ def finish_task(task_id, *, status="done", stage=None, success=0, failed=0,
     )
 
 
+def mark_status(task_id, status, stage=None):
+    """只改状态（批量任务跑完 / 崩了用它）。
+
+    不能拿 finish_task 收尾：它会整组覆盖 total/finished/success/failed，
+    2,700 篇跑完的结果会被清零。批量任务的计数是 bump_task 一路累加的。
+    """
+    fields = {"status": status, "finished_at": _now()}
+    if stage:
+        fields["stage"] = stage
+    update_task(task_id, **fields)
+
+
+def bump_task(task_id, cursor=None, **deltas):
+    """计数自增。
+
+    用 SQL 的 `x = x + 1` 而不是「读出来加一再写回」—— 后者在
+    「worker 写计数 / 前端轮询读计数」并发下会丢计数。
+    """
+    bad = set(deltas) - _COUNTER_FIELDS
+    if bad:
+        raise ValueError(f"不能自增这些字段：{sorted(bad)}")
+
+    sets, params = [], []
+    for name, delta in deltas.items():
+        sets.append(f"{name} = {name} + ?")
+        params.append(delta)
+    if cursor is not None:
+        sets.append("cursor = ?")
+        params.append(cursor)
+    if not sets:
+        return
+    execute(f"UPDATE crawl_task SET {', '.join(sets)} WHERE task_id = ?",
+            params + [task_id])
+
+
+def pause_task(task_id, reason):
+    """停下但保留断点 —— finished_at 不写，因为它还没跑完。"""
+    update_task(task_id, status="paused", pause_reason=reason)
+
+
+def resume_task(task_id):
+    update_task(task_id, status="running", pause_reason=None, finished_at=None)
+
+
+def find_active_task(conference_code, year):
+    """同一 (会议, 年份) 上还没跑完的任务 —— 避免重复消耗同一批配额。
+
+    只在明确了会议时才查：不限会议的任务彼此不冲突，本来就是要各爬各的。
+    """
+    if not conference_code:
+        return None
+
+    marks = ", ".join("?" for _ in _ACTIVE_STATUSES)
+    if year is None:
+        sql = f"""SELECT * FROM crawl_task
+                   WHERE conference_code = ? AND year IS NULL
+                     AND status IN ({marks})
+                   ORDER BY id DESC LIMIT 1"""
+        params = (conference_code, *_ACTIVE_STATUSES)
+    else:
+        sql = f"""SELECT * FROM crawl_task
+                   WHERE conference_code = ? AND year = ?
+                     AND status IN ({marks})
+                   ORDER BY id DESC LIMIT 1"""
+        params = (conference_code, year, *_ACTIVE_STATUSES)
+
+    row = query_one(sql, params)
+    return dict(row) if row else None
+
+
 # ---------------------------------------------------------------
 # crawl_task_item
 # ---------------------------------------------------------------
@@ -91,6 +167,19 @@ def create_item(task_row_id, seq, input_title):
              (task_id, seq, input_title, status, retry_count, created_at)
            VALUES (?, ?, ?, 'pending', 0, CURRENT_TIMESTAMP)""",
         (task_row_id, seq, input_title),
+    )
+
+
+def create_items(task_row_id, titles):
+    """一次建一批明细。
+
+    5,000 条逐条 create_item() 就是 5,000 次提交 —— 批量导入光建行就能卡住接口。
+    """
+    execute_many(
+        """INSERT INTO crawl_task_item
+             (task_id, seq, input_title, status, retry_count, created_at)
+           VALUES (?, ?, ?, 'pending', 0, CURRENT_TIMESTAMP)""",
+        [(task_row_id, seq, title) for seq, title in enumerate(titles, start=1)],
     )
 
 
@@ -120,10 +209,8 @@ def finish_item(item_id, status, *, paper_id=None, fail_reason=None,
     )
 
 
-def get_item(item_id):
-    row = query_one("SELECT * FROM crawl_task_item WHERE id = ?", (item_id,))
-    if not row:
-        return None
+def _with_parsed(row):
+    """行 → dict，顺手把 parsed_json 解成 parsed。"""
     d = dict(row)
     if d.get("parsed_json"):
         try:
@@ -133,22 +220,72 @@ def get_item(item_id):
     return d
 
 
+def get_item(item_id):
+    row = query_one("SELECT * FROM crawl_task_item WHERE id = ?", (item_id,))
+    return _with_parsed(row) if row else None
+
+
 def list_items(task_row_id):
     return [dict(r) for r in query_all(
         "SELECT * FROM crawl_task_item WHERE task_id = ? ORDER BY seq", (task_row_id,)
     )]
 
 
+def pending_items(task_row_id):
+    """还没落定的明细，按 seq 升序 —— 断点续爬就是从这里接着跑。
+
+    按 status 过滤而不是按 `cursor >= seq`：cursor 是给前端看的高水位，
+    一旦某条因暂停/异常没写下 cursor，用 seq 比较就会把这批题永久跳过。
+    """
+    return [dict(r) for r in query_all(
+        """SELECT * FROM crawl_task_item
+            WHERE task_id = ? AND status = 'pending' ORDER BY seq""",
+        (task_row_id,),
+    )]
+
+
+def success_items(task_row_id):
+    """已成功、可供「全部入库」的明细（带解析结果）。"""
+    return [_with_parsed(r) for r in query_all(
+        """SELECT * FROM crawl_task_item
+            WHERE task_id = ? AND status = 'success' ORDER BY seq""",
+        (task_row_id,),
+    )]
+
+
+def recent_failures(task_row_id, limit=10):
+    """最近若干条失败 —— 进度查询里只带这些，完整列表另走分页接口。"""
+    rows = query_all(
+        """SELECT id, seq, input_title, fail_reason FROM crawl_task_item
+            WHERE task_id = ? AND status = 'failed'
+            ORDER BY seq DESC LIMIT ?""",
+        (task_row_id, limit),
+    )
+    return [dict(r) for r in reversed(rows)]     # 取的是最近 N 条，展示按发生顺序
+
+
+def attach_paper(item_id, paper_id, commit=True):
+    """明细指回已入库的论文，供结果行「查看」跳转。"""
+    execute(
+        """UPDATE crawl_task_item SET paper_id = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?""",
+        (paper_id, item_id),
+        commit=commit,
+    )
+
+
 # ---------------------------------------------------------------
 # paper
 # ---------------------------------------------------------------
-def upsert_paper(p):
+def upsert_paper(p, commit=True):
     """按 title_key 入库，返回 (paper_id, action)。
 
-    对应设计文档 §1.4 阶段六的两种结果：
+    对应设计文档 §1.4 阶段六的三种结果：
       inserted —— 新论文
       updated  —— 已存在，但本次补全到了新字段（摘要 / DOI / PDF）
       skipped  —— 已存在且没有新东西
+
+    commit=False 供「全部入库」用：那是一次写几千篇，由调用方开一个事务。
     """
     row = query_one(
         "SELECT id, abstract, doi, pdf_url, authors FROM paper WHERE title_key = ?",
@@ -171,6 +308,7 @@ def upsert_paper(p):
                 p.get("source") or "manual", p.get("enrich_status") or "pending",
                 p.get("match_score"), p.get("fail_reason") or None,
             ),
+            commit=commit,
         )
         return pid, "inserted"
 
@@ -194,5 +332,6 @@ def upsert_paper(p):
     execute(
         f"UPDATE paper SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
         list(patches.values()) + [row["id"]],
+        commit=commit,
     )
     return row["id"], "updated"

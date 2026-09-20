@@ -1,9 +1,14 @@
-"""单条题目爬取链路 —— 设计文档 §6.1 步骤 2。
+"""抓取链路的核心 —— 设计文档 §6.1 步骤 2（单条）与步骤 3（批量）共用。
 
-流程（对应 §1.1 的阶段一到阶段六，本步骤只走单条路径）：
+流程（对应 §1.1 的阶段一到阶段六）：
 
     解析会议/年份 → 抓列表页 → 匹配题目 → 抓详情页取摘要 → 写 crawl_task_item
                                                           （auto_commit 时再写 paper）
+
+**单条和批量走的是同一段代码**：`resolve_title()` 负责前四步，
+`crawl_single()` 是「建一个只有 1 行的任务再跑一次」，
+`crawl/batch.py` 是「建一个 N 行的任务再跑 N 次」。
+两份实现迟早会漂移 —— 尤其是匹配阈值和降级规则那几处。
 
 几个刻意的设计取舍，都写在代码里了，这里先列一遍：
 
@@ -20,6 +25,7 @@
 """
 import threading
 import time
+from dataclasses import dataclass, field
 
 from flask import current_app
 
@@ -30,9 +36,6 @@ from .parsers import get_parser, parse_detail
 from .textutil import build_index, match_title, normalize_title
 from .units import (CONFERENCE_CODES, CONFERENCE_UNITS, VENUE_LABELS, held_in,
                     list_units, units_for)
-
-# 索引页缓存上限（个单元）。一届的解析结果约 2–3 MB，别让它无限涨。
-_INDEX_CACHE_MAX_UNITS = 3
 
 _index_cache = {}          # (source, tag) -> (过期时刻, entries, {title_key: entry})
 _index_lock = threading.Lock()
@@ -71,6 +74,18 @@ def reset_fetcher():
         _fetcher = None
 
 
+def set_fetcher(fetcher):
+    """测试用：注入一个替身。
+
+    批量任务跑在后台线程里，`fetcher=` 参数传不进去，只能从这里换 ——
+    用 monkeypatch 改 get_fetcher 也行，但线程启动时机由接口控制，
+    显式换掉实例更不容易漏。
+    """
+    global _fetcher
+    with _fetcher_lock:
+        _fetcher = fetcher
+
+
 def clear_index_cache():
     with _index_lock:
         _index_cache.clear()
@@ -84,6 +99,7 @@ def load_index(unit, fetcher):
     """
     key = (unit.source, unit.tag)
     ttl = current_app.config["CRAWL_INDEX_CACHE_TTL"]
+    cap = current_app.config["CRAWL_INDEX_CACHE_MAX_UNITS"]
     now = time.monotonic()
 
     with _index_lock:
@@ -98,7 +114,7 @@ def load_index(unit, fetcher):
     del html                                  # 及时放手，别让 7 MB 挂到函数结束
 
     with _index_lock:
-        if len(_index_cache) >= _INDEX_CACHE_MAX_UNITS:
+        if len(_index_cache) >= cap:
             oldest = min(_index_cache, key=lambda k: _index_cache[k][0])
             _index_cache.pop(oldest, None)
         _index_cache[key] = (time.monotonic() + ttl, entries, index)
@@ -138,35 +154,55 @@ def _validate(title, conference_code, year):
 
 
 # ---------------------------------------------------------------
-# 主流程
+# 检索 → 匹配 → 组装（单条与批量共用的核心）
 # ---------------------------------------------------------------
-def crawl_single(title, conference_code=None, year=None, auto_commit=False,
-                 fetcher=None):
-    """爬取单篇论文。
+@dataclass
+class Resolution:
+    """一次 `resolve_title()` 的结果。
 
-    同步执行：给定会议+年份时约 5–20 秒（一次索引页 + 一次详情页）；
-    不限定会议年份时按「新→旧」依次检索 10 个单元，最坏可能到分钟级，
-    所以有个总时限 CRAWL_SINGLE_DEADLINE_SEC 兜底。
-
-    返回的就是给前端的 `data`，成功与否都返回，不抛异常（参数错除外）。
+    `paper` 为 None 表示没找到，此时 `error` 一定是有值的 CrawlError ——
+    文案里已经写清检索过哪些单元，单条和批量因此共用同一套说法。
     """
-    title = (title or "").strip()
-    units = _validate(title, conference_code, year)
 
-    fetcher = fetcher or get_fetcher()
-    task = storage.create_task("single", conference_code, year, auto_commit, total=1)
-    item_id = storage.create_item(task["id"], seq=1, input_title=title)
+    paper: dict = None
+    match: object = None
+    unit: object = None
+    searched: list = field(default_factory=list)
+    candidates: list = field(default_factory=list)
+    truncated: bool = False
+    warnings: list = field(default_factory=list)
+    error: CrawlError = None
 
-    deadline = time.monotonic() + current_app.config["CRAWL_SINGLE_DEADLINE_SEC"]
-    started = time.monotonic()
+    @property
+    def found(self):
+        return self.paper is not None
 
-    # --- 阶段一/二：依次检索各单元的索引页，找到题目 ---
+    @property
+    def fetch_failed(self):
+        """这次失败是「抓取出了问题」，还是仅仅「没这篇」。
+
+        批量任务靠它决定要不要停手：一道题没找到很正常（用户可能记错题目），
+        但连续几十道都拉不下索引页，那就是站点或限速出了问题。
+        """
+        return self.error is not None and self.error.code != "NOT_FOUND_CVF"
+
+
+def resolve_title(title, units, fetcher, deadline=None):
+    """依次检索 units、匹配题目、命中后组装论文。
+
+    deadline 是 **time.monotonic() 的绝对时刻**（None = 不限时），到点即停，
+    已有结果当最终结果返回。
+
+    **不抛异常**：抓取层面的失败也收进 `Resolution.error`。调用方只看
+    `found` / `fetch_failed` 两个标志就够了 —— 批量任务要逐条吞掉失败继续跑，
+    每条都包一层 try/except 只会把主循环淹掉。
+    """
     matched = match = unit = None
     searched, candidates, truncated = [], [], False
 
     try:
         for u in units:
-            if time.monotonic() > deadline:
+            if deadline is not None and time.monotonic() > deadline:
                 truncated = True
                 break
             entries, index, cached = load_index(u, fetcher)
@@ -181,28 +217,64 @@ def crawl_single(title, conference_code=None, year=None, auto_commit=False,
             for c in m.candidates:
                 c["unit"] = u.label
                 candidates.append(c)
-
-        if matched is None:
-            return _fail(task, item_id, title, CrawlError(
-                "NOT_FOUND_CVF",
-                _not_found_message(title, searched, truncated),
-            ), searched, _top_candidates(candidates), started, fetcher)
-
-        # 找到了，进入补全阶段
-        storage.update_task(task["task_id"], stage="enrich")
-        paper, warnings = _build_paper(unit, matched, fetcher)
-        paper["match_score"] = match.score
-        paper["match_reason"] = match.reason
-
     except CrawlError as err:
-        # 抓取过程中的失败：索引页拉不下来 / 被熔断 / 网络错误
-        return _fail(task, item_id, title, err, searched,
-                     _top_candidates(candidates), started, fetcher)
+        # 索引页拉不下来 / 被熔断 / 网络错误
+        return Resolution(searched=searched, candidates=candidates,
+                          truncated=truncated, error=err)
+
+    if matched is None:
+        return Resolution(
+            searched=searched, candidates=candidates, truncated=truncated,
+            error=CrawlError("NOT_FOUND_CVF",
+                             _not_found_message(title, searched, truncated)),
+        )
+
+    paper, warnings = build_paper(unit, matched, fetcher)
+    paper["match_score"] = match.score
+    paper["match_reason"] = match.reason
+    return Resolution(paper=paper, match=match, unit=unit, searched=searched,
+                      candidates=candidates, truncated=truncated,
+                      warnings=warnings)
+
+
+# ---------------------------------------------------------------
+# 主流程（单条）
+# ---------------------------------------------------------------
+def crawl_single(title, conference_code=None, year=None, auto_commit=False,
+                 fetcher=None):
+    """爬取单篇论文。
+
+    同步执行：给定会议+年份时约 5–20 秒（一次索引页 + 一次详情页）；
+    不限定会议年份时按「新→旧」依次检索 9 个单元，最坏可能到分钟级，
+    所以有个总时限 CRAWL_SINGLE_DEADLINE_SEC 兜底。
+
+    返回的就是给前端的 `data`，成功与否都返回，不抛异常（参数错除外）。
+    """
+    title = (title or "").strip()
+    units = _validate(title, conference_code, year)
+
+    fetcher = fetcher or get_fetcher()
+    task = storage.create_task("single", conference_code, year, auto_commit, total=1)
+    item_id = storage.create_item(task["id"], seq=1, input_title=title)
+
+    deadline = time.monotonic() + current_app.config["CRAWL_SINGLE_DEADLINE_SEC"]
+    started = time.monotonic()
+
+    # --- 阶段一到四：检索 → 匹配 → 抓详情页取摘要 ---
+    try:
+        res = resolve_title(title, units, fetcher, deadline=deadline)
     except Exception:
         # 没预料到的异常：先把任务标成 failed 再往上抛，
         # 否则会留下一条永远 running 的任务，前端会一直轮询它
         storage.finish_task(task["task_id"], status="failed", failed=1)
         raise
+
+    if not res.found:
+        return _fail(task, item_id, title, res.error, res.searched,
+                     top_candidates(res.candidates), started, fetcher)
+
+    storage.update_task(task["task_id"], stage="enrich")
+    paper, match, unit, warnings = res.paper, res.match, res.unit, res.warnings
 
     # --- 阶段六：入库（仅 auto_commit） ---
     commit = None
@@ -243,7 +315,7 @@ def crawl_single(title, conference_code=None, year=None, auto_commit=False,
         "matched_unit": unit.label,
         "match_score": match.score,
         "match_reason": match.reason,
-        "searched_units": searched,
+        "searched_units": res.searched,
         "warnings": warnings,
         "auto_commit": bool(auto_commit),
         "commit": commit,
@@ -261,7 +333,8 @@ def _not_found_message(title, searched, truncated):
     return msg
 
 
-def _top_candidates(candidates):
+def top_candidates(candidates):
+    """最像的几条落选题目 —— 失败行给用户「是不是想找这几篇」的提示。"""
     return sorted(candidates, key=lambda c: c.get("score", 0), reverse=True)[:3]
 
 
@@ -290,7 +363,7 @@ def _fail(task, item_id, title, err, searched, candidates, started, fetcher):
 # ---------------------------------------------------------------
 # 组装论文对象
 # ---------------------------------------------------------------
-def _build_paper(unit, entry, fetcher):
+def build_paper(unit, entry, fetcher):
     """把「列表页条目 + 详情页摘要 + BibTeX」合成一条论文。
 
     权威值优先取列表页（一次带回整届，不依赖详情页是否改版），

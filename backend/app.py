@@ -59,5 +59,11 @@ if __name__ == "__main__":
     # 首次运行若库不存在，提示先建表
     if not os.path.exists(app.config["DB_PATH"]):
         print("[warn] 数据库不存在，请先执行：python scripts/init_db.py")
+    else:
+        # 上次进程退出时若还有任务在跑，把它们标成 paused，别留「永远 running」
+        from crawl import batch
+        recovered = batch.recover_stale_tasks(app)
+        if recovered:
+            print(f"[warn] 已把 {recovered} 个上次未跑完的任务标记为 paused（可从断点续跑）")
 
     app.run(host="127.0.0.1", port=5000, debug=True)

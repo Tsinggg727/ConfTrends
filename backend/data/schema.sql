@@ -122,6 +122,7 @@ CREATE TABLE IF NOT EXISTS crawl_task (
     auto_commit     BOOLEAN DEFAULT 0,                  -- 边爬边入库 / 暂存待确认
     status          VARCHAR(16) DEFAULT 'queued',       -- queued/running/paused/done/cancelled/failed
     stage           VARCHAR(16) DEFAULT 'discover',     -- discover/enrich/s2/extract/commit
+    pause_reason    VARCHAR(64),                        -- 暂停原因，见 crawl/batch.py 的 PAUSE_*
     total           INTEGER DEFAULT 0,
     finished        INTEGER DEFAULT 0,
     success         INTEGER DEFAULT 0,

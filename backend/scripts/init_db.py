@@ -38,33 +38,10 @@ PAPER_COLUMNS = {
 # 已废弃字段：数据源里没有 DBLP 了
 PAPER_DROPPED_COLUMNS = ("dblp_url",)
 
-
-def migrate(conn, verbose=True):
-    """给已存在的库补字段/删废弃字段，返回 (新增, 删除) 的字段名列表。"""
-    have = {r[1] for r in conn.execute("PRAGMA table_info(paper)")}
-
-    added = []
-    for name, ddl in PAPER_COLUMNS.items():
-        if name not in have:
-            conn.execute(f"ALTER TABLE paper ADD COLUMN {name} {ddl}")
-            added.append(name)
-
-    dropped = []
-    for name in PAPER_DROPPED_COLUMNS:
-        if name in have:
-            try:
-                conn.execute(f"ALTER TABLE paper DROP COLUMN {name}")   # SQLite 3.35+
-                dropped.append(name)
-            except sqlite3.OperationalError as e:
-                # 老 SQLite 不支持 DROP COLUMN：留着这个可空字段无害，不值得为它重建表
-                if verbose:
-                    print(f"[warn] 未能删除 paper.{name}（{e}），该字段已废弃但可忽略")
-    conn.commit()
-
-    if verbose and (added or dropped):
-        print(f"[migrate] paper 表新增字段：{', '.join(added) or '无'}")
-        print(f"[migrate] paper 表删除字段：{', '.join(dropped) or '无'}")
-    return added, dropped
+# crawl_task 同样按需补字段（功能1 §6.1 步骤 3：批量任务要记暂停原因）
+TASK_COLUMNS = {
+    "pause_reason": "VARCHAR(64)",
+}
 
 
 def _table_exists(conn, name):
@@ -73,9 +50,55 @@ def _table_exists(conn, name):
     ).fetchone() is not None
 
 
+def _add_columns(conn, table, columns):
+    if not _table_exists(conn, table):
+        return []                              # 新库交给 schema.sql 全量建，这里不越权
+    have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    added = []
+    for name, ddl in columns.items():
+        if name not in have:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+            added.append(f"{table}.{name}")
+    return added
+
+
+def _drop_columns(conn, table, columns, verbose):
+    if not _table_exists(conn, table):
+        return []
+    have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    dropped = []
+    for name in columns:
+        if name in have:
+            try:
+                conn.execute(f"ALTER TABLE {table} DROP COLUMN {name}")   # SQLite 3.35+
+                dropped.append(f"{table}.{name}")
+            except sqlite3.OperationalError as e:
+                # 老 SQLite 不支持 DROP COLUMN：留着这个可空字段无害，不值得为它重建表
+                if verbose:
+                    print(f"[warn] 未能删除 {table}.{name}（{e}），该字段已废弃但可忽略")
+    return dropped
+
+
+def migrate(conn, verbose=True):
+    """给已存在的库补字段/删废弃字段，返回 (新增, 删除) 的字段名列表。"""
+    added = _add_columns(conn, "paper", PAPER_COLUMNS)
+    added += _add_columns(conn, "crawl_task", TASK_COLUMNS)
+    dropped = _drop_columns(conn, "paper", PAPER_DROPPED_COLUMNS, verbose)
+    conn.commit()
+
+    if verbose and (added or dropped):
+        print(f"[migrate] 新增字段：{', '.join(added) or '无'}")
+        print(f"[migrate] 删除字段：{', '.join(dropped) or '无'}")
+    return added, dropped
+
+
 def main(reset=False):
     if reset and os.path.exists(Config.DB_PATH):
-        os.remove(Config.DB_PATH)
+        # WAL 模式会留下 -wal/-shm 兄弟文件，只删主库会让新库读到旧日志
+        for suffix in ("", "-wal", "-shm"):
+            path = Config.DB_PATH + suffix
+            if os.path.exists(path):
+                os.remove(path)
         print(f"[reset] 已删除旧库 {Config.DB_PATH}")
 
     os.makedirs(os.path.dirname(Config.DB_PATH), exist_ok=True)

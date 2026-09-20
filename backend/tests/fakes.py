@@ -10,10 +10,11 @@ from crawl.fail_reason import CrawlError
 class FakeFetcher:
     """按 URL 派发预置内容，并记录调用顺序。"""
 
-    def __init__(self, pages=None, errors=None):
+    def __init__(self, pages=None, errors=None, blocked_hosts=None):
         self.pages = dict(pages or {})      # url -> html
         self.errors = dict(errors or {})    # url -> CrawlError
         self.calls = []                     # [(url, kind)]，按发生顺序
+        self.blocked_hosts = list(blocked_hosts or [])   # 模拟已熔断的站点
 
     def get(self, url, kind="detail"):
         self.calls.append((url, kind))
@@ -31,8 +32,9 @@ class FakeFetcher:
         return self.get(url, "detail")
 
     def stats(self):
-        return {"requests": len(self.calls), "retries": 0, "blocked": 0,
-                "blocked_hosts": []}
+        return {"requests": len(self.calls), "retries": 0,
+                "blocked": len(self.blocked_hosts),
+                "blocked_hosts": list(self.blocked_hosts)}
 
     # 便利方法
     def urls(self):
