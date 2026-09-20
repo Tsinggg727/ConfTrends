@@ -20,7 +20,7 @@ from werkzeug.datastructures import FileStorage
 
 from conftest import fixture
 from crawl import batch, service, storage
-from crawl.fail_reason import InvalidParam
+from crawl.fail_reason import CrawlError, InvalidParam
 from crawl.units import units_for
 from fakes import FakeFetcher
 
@@ -230,6 +230,38 @@ def test_unit_熔断触发则暂停并保留pending(app, db):
         [(TITLE, "success"), (SPARSE, "pending")]
 
 
+def test_unit_续跑时索引页拉取失败则暂停可续跑(app, db):
+    # load_index 在 try 内：缓存过期后重拉失败要落成 paused + pause_reason，
+    # 不能让异常穿透把任务卡在未完成状态（卡住了就不能续跑）
+    task = make_task(app, [TITLE, SPARSE], "unit")
+    with app.app_context():
+        storage.pause_task(task["task_id"], batch.PAUSE_INTERRUPTED)  # 模拟上次中断
+
+    # 缓存已过期（不预热），续跑时索引页又拉不下来（站点熔断）
+    fake = cvf_fetcher(
+        errors={CVF_LIST_URL: CrawlError("PAGE_FETCH_FAILED",
+                                         "站点返回 403，已暂停抓取")},
+        blocked_hosts=["openaccess.thecvf.com"])
+    with app.app_context():
+        with pytest.raises(CrawlError):
+            batch.run(app, task["task_id"], fetcher=fake)
+
+    row = db.execute("SELECT * FROM crawl_task WHERE task_id = ?",
+                     (task["task_id"],)).fetchone()
+    assert (row["status"], row["pause_reason"]) == ("paused", batch.PAUSE_BREAKER)
+    items = db.execute(
+        "SELECT status FROM crawl_task_item WHERE task_id = ?",
+        (row["id"],)).fetchall()
+    assert all(i["status"] == "pending" for i in items)
+
+    # 站点恢复后再续跑：从 pending 接着跑，正常跑完
+    with app.app_context():
+        batch.run(app, task["task_id"], fetcher=cvf_fetcher())
+    row = db.execute("SELECT status, success FROM crawl_task WHERE task_id = ?",
+                     (task["task_id"],)).fetchone()
+    assert (row["status"], row["success"]) == ("done", 2)
+
+
 # ---------------------------------------------------------------
 # bibtex 模式：题目 → 检索 → 边爬边入库
 # ---------------------------------------------------------------
@@ -243,6 +275,37 @@ def test_bibtex_边爬边入库写paper(app, db):
     assert (row["status"], row["finished"], row["success"]) == ("done", 2, 2)
     papers = db.execute("SELECT title FROM paper ORDER BY id").fetchall()
     assert [p["title"] for p in papers] == [TITLE, SPARSE]
+
+
+def test_边爬边入库_单条事务中途崩溃则整条回滚(app, db, monkeypatch):
+    # §1.1 阶段六「单条一个事务」：第二篇在关键词关联这步崩，
+    # paper 表不该留下第二篇的半成品
+    task = make_task(app, [TITLE, SPARSE], "unit")
+    real_link = storage.link_keywords
+    calls = []
+
+    def link_boom(paper_id, keywords, commit=True):
+        calls.append(paper_id)
+        if len(calls) == 2:
+            raise RuntimeError("模拟关键词写入崩溃")
+        return real_link(paper_id, keywords, commit)
+
+    monkeypatch.setattr(storage, "link_keywords", link_boom)
+    with app.app_context():
+        with pytest.raises(RuntimeError):
+            batch.run(app, task["task_id"], fetcher=cvf_fetcher())
+
+    row = db.execute("SELECT * FROM crawl_task WHERE task_id = ?",
+                     (task["task_id"],)).fetchone()
+    assert (row["status"], row["pause_reason"]) == ("paused", batch.PAUSE_INTERNAL)
+    # 第一篇已按自己的事务提交，第二篇整体回滚 —— 「单条一个事务」的粒度
+    papers = db.execute("SELECT title FROM paper ORDER BY id").fetchall()
+    assert [p["title"] for p in papers] == [TITLE]
+    items = db.execute(
+        "SELECT input_title, status FROM crawl_task_item "
+        "WHERE task_id = ? ORDER BY seq", (row["id"],)).fetchall()
+    assert [(i["input_title"], i["status"]) for i in items] == \
+        [(TITLE, "success"), (SPARSE, "pending")]
 
 
 # ---------------------------------------------------------------

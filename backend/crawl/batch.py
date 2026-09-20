@@ -364,26 +364,29 @@ def run(app, task_id, fetcher=None):
         # 但索引页有缓存，跑起来之后耗时几乎全在详情页，所以统一显示 enrich。
         storage.update_task(task_id, stage="enrich")
 
-        # 按任务类型选「处理一条明细」的方式。unit 的整届清单已在阶段一装进
-        # 索引缓存，这里再取一次是 cache 命中，不会重拉 5–7 MB 的页面。
-        if task["type"] == "unit":
-            unit = units[0]
-            entries, _index, _cached = service.load_index(unit, fetcher)
-            entry_by_key = {normalize_title(e["title"]): e for e in entries}
-
-            def process(item):
-                return _process_unit_item(item, unit, entry_by_key, fetcher,
-                                          auto_commit)
-        else:
-            item_deadline = cfg["CRAWL_SINGLE_DEADLINE_SEC"] or None
-
-            def process(item):
-                return _process_item(item, units, fetcher, item_deadline,
-                                     auto_commit)
-
         consecutive_failures = 0
         pause_reason = None
         try:
+            # 按任务类型选「处理一条明细」的方式。unit 的整届清单通常已在
+            # 阶段一装进索引缓存，这里再取一次是命中；但续跑时缓存可能已过期
+            # （TTL 30 分钟），要重拉 5–7 MB 的索引页，可能失败 —— 所以放进
+            # try：拉不下来就暂停任务记 pause_reason，而不是让异常穿透 ——
+            # 那样任务永远停在未完成状态，既不能续跑，前端也只能一直轮询。
+            if task["type"] == "unit":
+                unit = units[0]
+                entries, _index, _cached = service.load_index(unit, fetcher)
+                entry_by_key = {normalize_title(e["title"]): e for e in entries}
+
+                def process(item):
+                    return _process_unit_item(item, unit, entry_by_key, fetcher,
+                                              auto_commit)
+            else:
+                item_deadline = cfg["CRAWL_SINGLE_DEADLINE_SEC"] or None
+
+                def process(item):
+                    return _process_item(item, units, fetcher, item_deadline,
+                                         auto_commit)
+
             # 只取 pending：断点续爬就是把上次没跑到的接着跑，成功的绝不重来
             for item in storage.pending_items(task["id"]):
                 _set_live(task_id, current_title=item["input_title"])
@@ -409,6 +412,15 @@ def run(app, task_id, fetcher=None):
                 if consecutive_failures >= max_consecutive:
                     pause_reason = PAUSE_FAILURES
                     break
+        except CrawlError:
+            # 抓取层失败：整届清单在续跑时缓存已过期、重拉又被熔断/网络错误
+            # 挡住，或会议表缺种子数据 —— 一条都处理不了。落成 paused 才能
+            # 续跑；熔断（403/429）用 BREAKER 的说法，与循环内的检查同一口径。
+            reason = PAUSE_BREAKER if fetcher.stats().get("blocked_hosts") \
+                else PAUSE_INTERNAL
+            storage.pause_task(task_id, reason)
+            _set_live(task_id, pause_reason=reason)
+            raise
         except Exception:
             # 崩了也要留个能续跑的状态，否则前端会一直轮询一条永远 running 的任务。
             # 用 paused 而不是 failed —— 崩溃不该堵死「从断点续跑」这条路。
@@ -502,9 +514,12 @@ def _store_paper(item_id, paper):
     """
     paper = dict(paper)
     paper["conference_id"] = _conference_id(paper)
-    paper_id, action = storage.upsert_paper(paper)
-    storage.attach_paper(item_id, paper_id)
-    storage.link_keywords(paper_id, paper.get("keywords") or [])
+    # 单条一个事务（§1.1 阶段六）：paper + 明细指回 + 关键词关联要么全成
+    # 要么全不成 —— 中途崩溃不留下「paper 在、关联不在」的半成品。
+    with transaction():
+        paper_id, action = storage.upsert_paper(paper, commit=False)
+        storage.attach_paper(item_id, paper_id, commit=False)
+        storage.link_keywords(paper_id, paper.get("keywords") or [], commit=False)
     return paper_id, action
 
 
