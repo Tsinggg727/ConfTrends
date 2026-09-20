@@ -13,8 +13,9 @@ import { useCrawlStore } from '@/stores/crawlStore'
 const store = useCrawlStore()
 
 const hasFailures = computed(() => (store.task?.failed ?? 0) > 0)
+const canRetry = computed(() => hasFailures.value && store.isTerminal)
 const showFooter = computed(() =>
-  store.task && (store.isStaged || hasFailures.value || store.canCancel))
+  store.task && (store.isStaged || canRetry.value || store.canCancel))
 
 async function commitAll() {
   const counts = await store.commit()
@@ -38,14 +39,23 @@ async function cancelTask() {
   await store.cancel()
   ElMessage.info('已请求取消，当前这一篇完成后停手')
 }
+
+/** §5.3：生成新任务重试全部失败项，跑完的统计不被污染 */
+async function retryFailed() {
+  const data = await store.retry()
+  ElMessage.success(`已创建重试任务，共 ${data.total} 条`)
+}
 </script>
 
 <template>
   <div v-if="showFooter" class="task-footer">
     <div class="left">
-      <el-tooltip content="失败重试将在步骤 7 接入" placement="top">
+      <el-tooltip
+        :content="canRetry ? '生成新任务重试全部失败项' : '等任务跑完才能重试'"
+        placement="top"
+      >
         <span>
-          <el-button :disabled="!hasFailures">重试失败项</el-button>
+          <el-button :disabled="!canRetry" @click="retryFailed">重试失败项</el-button>
         </span>
       </el-tooltip>
 

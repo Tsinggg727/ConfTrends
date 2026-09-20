@@ -20,6 +20,7 @@ import {
   listTasks,
   pauseTask,
   resumeTask,
+  retryTask,
 } from '@/api/crawl'
 
 const ACTIVE_KEY = 'confTrends.activeTaskId'
@@ -234,6 +235,17 @@ export const useCrawlStore = defineStore('crawl', () => {
     return counts
   }
 
+  /**
+   * 失败项重试（§5.3）：后端生成**新任务**，前端切过去看 ——
+   * 原任务的统计数字不被污染，两次结果可对比。
+   * @param {number[]|undefined} itemIds 缺省 = 全部可重试项；传单个 id 即行内重试
+   */
+  async function retry(itemIds) {
+    const data = await retryTask(taskId.value, itemIds)
+    await watchTask(data.task_id)
+    return data
+  }
+
   // ---------------------------------------------------------------
   // 历史任务
   // ---------------------------------------------------------------
@@ -256,6 +268,6 @@ export const useCrawlStore = defineStore('crawl', () => {
     history, historyTotal, navBadge,
     startPolling, stopPolling, poll, watchTask, restore,
     loadItems, setFilter, setPage, ignoreRow,
-    pause, resume, cancel, commit, loadHistory,
+    pause, resume, cancel, commit, retry, loadHistory,
   }
 })

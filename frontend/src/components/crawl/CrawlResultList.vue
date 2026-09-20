@@ -43,6 +43,7 @@ const filters = [
         :key="row.seq"
         :row="row"
         @ignore="store.ignoreRow"
+        @retry="(id) => store.retry([id])"
       />
     </div>
 

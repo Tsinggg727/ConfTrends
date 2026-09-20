@@ -20,7 +20,7 @@ from werkzeug.datastructures import FileStorage
 
 from conftest import fixture
 from crawl import batch, service, storage
-from crawl.fail_reason import InvalidParam
+from crawl.fail_reason import CrawlError, InvalidParam
 from fakes import FakeFetcher
 
 CVF_INDEX = fixture("cvf_index.html")
@@ -616,3 +616,165 @@ def test_API_cancel_终态返回409_非运行直接落库(app, client):
     resp = client.post(f"/api/v1/tasks/{task2['task_id']}/cancel")
     assert resp.status_code == 200
     assert resp.get_json()["data"]["status"] == "cancelled"
+
+
+# ---------------------------------------------------------------
+# 失败重试（§4.2 /retry + §5.3「生成新任务，不污染原任务统计」）
+# ---------------------------------------------------------------
+def _run_with_broken_list(app, task):
+    """跑一个任务：索引页拉不下来（PAGE_FETCH_FAILED，可重试），
+    三条明细全部失败 —— 注意详情页失败是警告级不算失败（§1.2），
+    可重试的失败明细只能来自索引页层面的错误。"""
+    fake = cvf_fetcher(
+        errors={CVF_LIST_URL: CrawlError("PAGE_FETCH_FAILED", "服务端错误 HTTP 500")})
+    with app.app_context():
+        batch.run(app, task["task_id"], fetcher=fake)
+    return task
+
+
+def test_retry_生成新任务只含可重试项(app, db, client):
+    task = make_task(app, [MISSING, TITLE, SPARSE])
+    _run_with_broken_list(app, task)
+
+    failed = db.execute(
+        "SELECT id, input_title, fail_reason FROM crawl_task_item "
+        "WHERE task_id = ? AND status = 'failed'", (task["id"],)).fetchall()
+    assert len(failed) == 3
+
+    # 把 MISSING 改成「查无此文」：不可重试，重试任务不应包含它
+    db.execute(
+        "UPDATE crawl_task_item SET fail_reason = 'NOT_FOUND_CVF' "
+        "WHERE task_id = ? AND input_title = ?", (task["id"], MISSING))
+    db.commit()
+
+    # retry 起的是真线程，fetcher 从 service 全局取 —— 注入假体避免联网
+    service.set_fetcher(cvf_fetcher())
+    resp = client.post(f"/api/v1/tasks/{task['task_id']}/retry", json={})
+    assert resp.status_code == 200
+    data = resp.get_json()["data"]
+    assert data["total"] == 2                       # 只剩两条可重试
+    assert data["task_id"] != task["task_id"]
+
+    new_row_id = db.execute("SELECT id FROM crawl_task WHERE task_id = ?",
+                            (data["task_id"],)).fetchone()["id"]
+    new_items = db.execute(
+        "SELECT input_title FROM crawl_task_item WHERE task_id = ?",
+        (new_row_id,)).fetchall()
+    assert sorted(i["input_title"] for i in new_items) == sorted([TITLE, SPARSE])
+    # 原任务统计未被污染
+    old = db.execute("SELECT failed, success, total FROM crawl_task WHERE task_id = ?",
+                     (task["task_id"],)).fetchone()
+    assert (old["failed"], old["success"], old["total"]) == (3, 0, 3)
+
+
+def test_retry_指定item_ids_单条重试(app, db, client):
+    task = make_task(app, [MISSING, TITLE, SPARSE])
+    _run_with_broken_list(app, task)
+
+    # 索引页故障下三条都是 PAGE_FETCH_FAILED（可重试）；先把 MISSING
+    # 改回「查无此文」，它才落到不可重试的一侧
+    db.execute(
+        "UPDATE crawl_task_item SET fail_reason = 'NOT_FOUND_CVF' "
+        "WHERE task_id = ? AND input_title = ?", (task["id"], MISSING))
+    db.commit()
+
+    failed = db.execute(
+        "SELECT id, input_title FROM crawl_task_item "
+        "WHERE task_id = ? AND status = 'failed'", (task["id"],)).fetchall()
+    by_title = {r["input_title"]: r["id"] for r in failed}
+
+    service.set_fetcher(cvf_fetcher())              # 同上：真线程不联网
+
+    # MISSING 默认就是 NOT_FOUND_CVF（不可重试）→ 指定它 → 过滤完为空 → 400
+    resp = client.post(f"/api/v1/tasks/{task['task_id']}/retry",
+                       json={"item_ids": [by_title[MISSING]]})
+    assert resp.status_code == 400
+
+    # 只重试 SPARSE 一条（前端失败行 [重试] 走的就是这个形态）
+    resp = client.post(f"/api/v1/tasks/{task['task_id']}/retry",
+                       json={"item_ids": [by_title[SPARSE]]})
+    assert resp.status_code == 200
+    data = resp.get_json()["data"]
+    assert data["total"] == 1
+    new_row_id = db.execute("SELECT id FROM crawl_task WHERE task_id = ?",
+                            (data["task_id"],)).fetchone()["id"]
+    items = db.execute(
+        "SELECT input_title FROM crawl_task_item WHERE task_id = ?",
+        (new_row_id,)).fetchall()
+    assert [i["input_title"] for i in items] == [SPARSE]
+
+
+def test_retry_状态机与参数边界(app, client):
+    task = make_task(app, [TITLE])
+    # 没跑完（paused / running）不能重试 —— 应该走续跑
+    with app.app_context():
+        storage.pause_task(task["task_id"], batch.PAUSE_BREAKER)
+    resp = client.post(f"/api/v1/tasks/{task['task_id']}/retry", json={})
+    assert resp.status_code == 409
+
+    with app.app_context():
+        storage.update_task(task["task_id"], status="running")
+    assert client.post(f"/api/v1/tasks/{task['task_id']}/retry",
+                       json={}).status_code == 409
+
+    # 跑完但没有失败项 → 400
+    with app.app_context():
+        items = storage.list_items(task["id"])
+        storage.finish_item(items[0]["id"], "success",
+                            parsed={"input_title": TITLE})
+        storage.mark_status(task["task_id"], "done")
+    assert client.post(f"/api/v1/tasks/{task['task_id']}/retry",
+                       json={}).status_code == 400
+
+    # item_ids 不是整数数组 → 400
+    with app.app_context():
+        storage.finish_item(storage.list_items(task["id"])[0]["id"], "failed",
+                            fail_reason="PAGE_FETCH_FAILED")
+    assert client.post(f"/api/v1/tasks/{task['task_id']}/retry",
+                       json={"item_ids": ["abc"]}).status_code == 400
+    assert client.post(f"/api/v1/tasks/{task['task_id']}/retry",
+                       json={"item_ids": 1}).status_code == 400
+
+
+def test_retry_任务不存在404(client):
+    assert client.post("/api/v1/tasks/00000000-0000-0000-0000-000000000000/retry",
+                       json={}).status_code == 404
+
+
+def test_API_cancel后从断点续跑整条链路(app, client):
+    """步骤 5 补的 cancel/resume 的 API 级链路验证：取消 → 续跑 → 跑完。"""
+    # 用 import 起真线程（make_task 落库的 running 行会占住会议-年份）。
+    # 每条 detail 睡 0.3s，给主线程留出「看到第一条成功 → 发 cancel」的窗口。
+    slow = cvf_fetcher()
+    real_get_detail = slow.get_detail
+
+    def slow_detail(url):
+        time.sleep(0.3)
+        return real_get_detail(url)
+
+    slow.get_detail = slow_detail
+    service.set_fetcher(slow)
+    resp = client.post("/api/v1/papers/import", json={
+        "type": "titles", "text": f"{TITLE}\n{SPARSE}",
+        "conference_code": "CVPR", "year": 2024})
+    task_id = resp.get_json()["data"]["task_id"]
+
+    def wait_status(tid, statuses, timeout=5.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            body = client.get(f"/api/v1/tasks/{tid}").get_json()["data"]
+            if body["status"] in statuses:
+                return body
+            time.sleep(0.01)
+        raise AssertionError(f"任务 {tid} 没有进入 {statuses}")
+
+    body = wait_status(task_id, ("cancelled", "done"))
+    if body["status"] == "done":
+        assert body["success"] == 2          # 机器太慢没赶上取消窗口，链路仍闭环
+        return
+    assert body["success"] == 1              # 已完成的保留
+
+    resume = client.post(f"/api/v1/tasks/{task_id}/resume")
+    assert resume.status_code == 200
+    final = wait_status(task_id, ("done",))
+    assert final["success"] == 2

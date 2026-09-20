@@ -53,6 +53,16 @@ function reconnect() {
   store.startPolling()
   store.poll()
 }
+
+/** §5.3 任务失败态：[从断点继续] + [查看已完成部分] */
+async function resumeFromBreakpoint() {
+  await store.resume()
+  ElMessage.success('已从断点继续')
+}
+
+function viewCompleted() {
+  store.setFilter('success')
+}
 </script>
 
 <template>
@@ -102,6 +112,12 @@ function reconnect() {
     <div v-if="task.pause_label" class="pause-note">
       ⚠ {{ task.pause_label }}（可点「继续」从断点续跑）
     </div>
+    <div v-if="store.canResume" class="pause-actions">
+      <el-button size="small" type="primary" @click="resumeFromBreakpoint">
+        从断点继续
+      </el-button>
+      <el-button size="small" @click="viewCompleted">查看已完成部分</el-button>
+    </div>
     <div v-if="slowHint" class="slow-hint">
       当前速率较低，可能正在被限流，请耐心等待
     </div>
@@ -146,6 +162,11 @@ function reconnect() {
   margin-top: 10px;
   font-size: 13px;
   color: #b45309;
+}
+.pause-actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 10px;
 }
 .slow-hint {
   margin-top: 8px;

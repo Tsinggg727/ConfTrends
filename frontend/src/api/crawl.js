@@ -57,3 +57,12 @@ export function resumeTask(taskId) {
 export function cancelTask(taskId) {
   return request.post(`/tasks/${taskId}/cancel`)
 }
+
+/**
+ * 失败项重试 → 返回**新任务**（{ task_id, total, poll_url }）。
+ * @param {number[]|undefined} itemIds 缺省 = 全部可重试项；传单个 id 即行内 [重试]
+ */
+export function retryTask(taskId, itemIds) {
+  return request.post(`/tasks/${taskId}/retry`,
+    itemIds ? { item_ids: itemIds } : {})
+}

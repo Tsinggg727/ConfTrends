@@ -9,6 +9,7 @@
     POST /api/v1/tasks/<task_id>/pause    用户手动暂停（§5.3 的 [⏸ 暂停]）
     POST /api/v1/tasks/<task_id>/resume   从断点续跑
     POST /api/v1/tasks/<task_id>/cancel   取消任务（已完成部分保留）
+    POST /api/v1/tasks/<task_id>/retry    失败项重试 → 生成新任务（§4.2）
 
 `POST /papers/import` 的 `type` 支持 `titles`（步骤 3）/ `bibtex` / `unit`
 （步骤 4）。三种输入共用一条调度链：解析输入 → 建任务与明细 → 后台线程边爬边写，
@@ -502,6 +503,62 @@ def cancel_task(task_id):
     return ok({"task_id": task_id, "status": "cancelled"},
               message=f"任务已取消，已完成的 {task['finished']} 条保留，"
                       f"剩余 {task['total'] - task['finished']} 条未处理")
+
+
+@bp.post("/tasks/<task_id>/retry")
+def retry_task(task_id):
+    """失败项重试（§4.2）—— 生成**新任务**，不污染原任务的统计数字，
+    两次结果可对比（§5.3）。
+
+    请求体 `{"item_ids": [...]}` 缺省 = 全部可重试项；显式给的 item_ids
+    里若混着不可重试的（如 NOT_FOUND_CVF），按 fail_reason 枚举过滤掉 ——
+    「站内没这篇」重跑一万遍也不会有结果，不能让它白耗配额。
+    """
+    task = storage.get_task(task_id)
+    if task is None:
+        return fail(404, "任务不存在"), 404
+    if task["status"] in ("queued", "running", "pausing", "cancelling", "paused"):
+        # 暂停的任务应该走续跑而不是重试 —— 它还有没跑完的 pending
+        return fail(409, f"任务还没跑完（{task['status']}），"
+                         f"请先续跑或等它结束"), 409
+
+    payload = request.get_json(silent=True) or {}
+    item_ids = payload.get("item_ids")
+    if item_ids is not None and (
+            not isinstance(item_ids, list)
+            or not all(isinstance(i, int) for i in item_ids)):
+        return fail(400, "item_ids 必须是整数数组"), 400
+
+    candidates = [r for r in storage.failed_items(task["id"])
+                  if is_retryable(r["fail_reason"])]
+    if item_ids is not None:
+        wanted = set(item_ids)
+        candidates = [r for r in candidates if r["id"] in wanted]
+
+    if not candidates:
+        return fail(400, "没有可重试的失败项（不可重试的失败重跑也不会有结果）"), 400
+
+    # 同一 (会议, 年份) 上已有任务在跑：和 /import 一样拒绝（§4.1 ②）
+    existing = storage.find_active_task(task["conference_code"], task["year"])
+    if existing:
+        return fail(409, f"{_target_label(existing)} 上已有未跑完的任务 "
+                         f"{existing['task_id']}，请先续跑它或等它跑完"), 409
+
+    new_task = storage.create_task(
+        task["type"], task["conference_code"], task["year"],
+        bool(task["auto_commit"]), total=len(candidates))
+    storage.create_items(new_task["id"], [r["input_title"] for r in candidates])
+
+    batch.start(current_app._get_current_object(), new_task["task_id"])
+
+    return ok({
+        "task_id": new_task["task_id"],
+        "type": new_task["type"],
+        "total": len(candidates),
+        "auto_commit": bool(new_task["auto_commit"]),
+        "source_task_id": task_id,
+        "poll_url": f"/api/v1/tasks/{new_task['task_id']}",
+    }, message=f"已创建重试任务，共 {len(candidates)} 条")
 
 
 def _task_summary(row):

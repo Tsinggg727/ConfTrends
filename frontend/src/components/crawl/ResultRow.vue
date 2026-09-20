@@ -10,7 +10,7 @@ import { computed } from 'vue'
 const props = defineProps({
   row: { type: Object, required: true },
 })
-defineEmits(['ignore'])
+defineEmits(['ignore', 'retry'])
 
 const isSuccess = computed(() => props.row.status === 'success')
 const paper = computed(() => props.row.paper || {})
@@ -87,8 +87,7 @@ const codeLabel = computed(() => props.row.fail_reason || '')
           size="small"
           text
           type="primary"
-          disabled
-          title="失败重试将在步骤 7 接入"
+          @click="$emit('retry', row.id)"
         >
           重试
         </el-button>

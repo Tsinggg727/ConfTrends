@@ -266,7 +266,7 @@ ITEM_FILTERS = ("all", "success", "failed", "skipped", "pending")
 # 暂存模式（auto_commit=false）的 paper 还没进 paper 表，三字段从
 # parsed_json.paper 取；边爬边入库的行两者都有，以 paper 表为准（更新）。
 _ITEM_SELECT = """
-    SELECT i.seq, i.input_title, i.status, i.paper_id, i.fail_reason,
+    SELECT i.id, i.seq, i.input_title, i.status, i.paper_id, i.fail_reason,
            i.detail_url, i.pdf_url, i.parsed_json,
            p.title AS paper_title, p.abstract AS paper_abstract,
            p.url AS paper_url, p.year AS paper_year,
@@ -339,6 +339,7 @@ def _item_row(r):
         [k.get("name") for k in staged.get("keywords") or [] if k.get("name")]
 
     return {
+        "id": d["id"],
         "seq": d["seq"],
         "input_title": d["input_title"],
         "status": d["status"],
@@ -363,7 +364,7 @@ def success_items(task_row_id):
 
 
 def recent_failures(task_row_id, limit=10):
-    """最近若干条失败 —— 进度查询里只带这些，完整列表另走分页接口。"""
+    """最近若干条失败（§4.1 ③），带上人话文案。"""
     rows = query_all(
         """SELECT id, seq, input_title, fail_reason FROM crawl_task_item
             WHERE task_id = ? AND status = 'failed'
@@ -371,6 +372,15 @@ def recent_failures(task_row_id, limit=10):
         (task_row_id, limit),
     )
     return [dict(r) for r in reversed(rows)]     # 取的是最近 N 条，展示按发生顺序
+
+
+def failed_items(task_row_id):
+    """全部失败明细（§4.2 /retry 的候选池），按 seq 升序。"""
+    return [dict(r) for r in query_all(
+        """SELECT id, seq, input_title, fail_reason FROM crawl_task_item
+            WHERE task_id = ? AND status = 'failed' ORDER BY seq""",
+        (task_row_id,),
+    )]
 
 
 def attach_paper(item_id, paper_id, commit=True):
