@@ -4,10 +4,12 @@ import { useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 
 import { useGlobalStore } from '@/stores/globalStore'
+import { useCrawlStore } from '@/stores/crawlStore'
 
 const route = useRoute()
 const router = useRouter()
 const globalStore = useGlobalStore()
+const crawlStore = useCrawlStore()
 const { year, summary } = storeToRefs(globalStore)
 
 /** 导航项，顺序与原型一致 */
@@ -47,6 +49,8 @@ onMounted(() => {
   // 年份默认落到数据的最新一年
   const [min, max] = summary.value.year_range || []
   if (max) year.value = max
+  // 导航角标：有没有任务在跑，问历史接口最省事（不启动轮询）
+  crawlStore.loadHistory()
 })
 </script>
 
@@ -77,6 +81,11 @@ onMounted(() => {
             :class="{ active: activeNav === item.key }"
           >
             {{ item.label }}
+            <!-- 后台有爬取任务在跑时给「爬取 / 导入」加小圆点角标（§5.3） -->
+            <span
+              v-if="item.key === 'crawl' && crawlStore.navBadge"
+              class="run-dot"
+            />
           </router-link>
         </nav>
 
@@ -174,6 +183,26 @@ onMounted(() => {
   background: linear-gradient(135deg, var(--ct-primary), var(--ct-secondary));
   color: #fff;
   font-weight: 600;
+}
+
+/* 后台任务运行中的小圆点角标 */
+.nav-link {
+  position: relative;
+}
+.run-dot {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ct-accent);
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.25);
+  animation: dot-pulse 1.6s ease-in-out infinite;
+}
+@keyframes dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
 }
 
 .header-right {

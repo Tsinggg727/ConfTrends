@@ -2,9 +2,13 @@
 
     POST /api/v1/papers/crawl             单个题目爬取（同步）
     POST /api/v1/papers/import            批量导入（异步，立即返回 task_id）
+    GET  /api/v1/tasks                    任务列表（历史任务面板）
     GET  /api/v1/tasks/<task_id>          任务进度查询（前端每 2s 轮询）
+    GET  /api/v1/tasks/<task_id>/items    结果行分页（支持状态筛选 / 增量）
     POST /api/v1/tasks/<task_id>/commit   暂存模式的「全部入库」
+    POST /api/v1/tasks/<task_id>/pause    用户手动暂停（§5.3 的 [⏸ 暂停]）
     POST /api/v1/tasks/<task_id>/resume   从断点续跑
+    POST /api/v1/tasks/<task_id>/cancel   取消任务（已完成部分保留）
 
 `POST /papers/import` 的 `type` 支持 `titles`（步骤 3）/ `bibtex` / `unit`
 （步骤 4）。三种输入共用一条调度链：解析输入 → 建任务与明细 → 后台线程边爬边写，
@@ -12,16 +16,17 @@
 
 **响应约定**：业务失败（题目没找到、摘要为空）返回 HTTP 200 +
 `data.status = "failed"`，只有参数本身不合法才用 4xx ——
-否则前端拦截器会把「没找到」也弹成红色 toast，与原型④「失败行内展示原因」
-的表现冲突（§4.1 的设计取舍）。批量任务同理：单条失败不进 HTTP 状态码，
+否则前端拦截器会把「没找到」也弹成红色 toast，与原型④「失败行内展示原因」的
+表现冲突（§4.1 的设计取舍）。批量任务同理：单条失败不进 HTTP 状态码，
 它是任务结果的一部分，通过 `recent_failures` 与结果列表呈现。
 """
 from flask import Blueprint, current_app, request
 
 from crawl import batch, service, storage
-from crawl.fail_reason import CrawlError, InvalidParam, describe
+from crawl.fail_reason import CrawlError, InvalidParam, describe, is_retryable
 from crawl.units import CONFERENCE_CODES, held_in, units_for
 from db import query_one
+from utils.pagination import paginated, parse_pagination
 from utils.response import fail, ok
 
 bp = Blueprint("crawl", __name__)
@@ -290,35 +295,21 @@ def get_task(task_id):
     live = batch.live_state(task_id)
     pause_reason = task["pause_reason"] or live.get("pause_reason")
 
-    return ok({
-        "task_id": task["task_id"],
-        "type": task["type"],
-        "status": task["status"],
-        "stage": task["stage"],
-        "stage_label": STAGE_LABELS.get(task["stage"], task["stage"]),
-        "conference_code": task["conference_code"],
-        "year": task["year"],
-        "auto_commit": bool(task["auto_commit"]),
-        "total": total,
-        "finished": finished,
-        "percent": round(finished / total * 100, 1) if total else 0.0,
-        "success": task["success"],
-        "failed": task["failed"],
-        "skipped": task["skipped"],
+    # 共享字段（列表 / 进度查询同一口径）+ 进度查询独有的实时字段
+    data = _task_summary(task)
+    data.update({
+        "pause_reason": pause_reason,
+        "pause_label": batch.pause_label(pause_reason),
         "current_title": live.get("current_title"),
+        "started_at": task["started_at"],
         "elapsed_sec": max(int(elapsed), 0),
         "eta_sec": _eta_sec(task, total, finished, elapsed),
         "qps": _qps(finished, elapsed),
-        "cursor": task["cursor"],
-        "pause_reason": pause_reason,
-        "pause_label": batch.pause_label(pause_reason),
         "recent_failures": _recent_failures(task["id"]),
-        "created_at": task["created_at"],
-        "started_at": task["started_at"],
-        "finished_at": task["finished_at"],
         # 限速器计数：requests / retries / blocked / blocked_hosts
         "fetcher": service.get_fetcher().stats(),
     })
+    return ok(data)
 
 
 def _elapsed_sec(task_id):
@@ -425,3 +416,117 @@ def resume_task(task_id):
         "cursor": task["cursor"],
         "poll_url": f"/api/v1/tasks/{task_id}",
     }, message=f"已从断点续跑，剩余 {pending} 条")
+
+
+# ---------------------------------------------------------------
+# 任务列表 / 结果行 / 暂停 / 取消
+# ---------------------------------------------------------------
+@bp.get("/tasks")
+def list_tasks():
+    """任务列表（§4.2）—— 历史任务面板与「刷新后找回任务」的数据源。"""
+    page, page_size = parse_pagination(request.args)
+    rows, total = storage.list_tasks(page, page_size)
+    return ok(paginated([_task_summary(r) for r in rows],
+                        total, page, page_size))
+
+
+@bp.get("/tasks/<task_id>/items")
+def list_task_items(task_id):
+    """结果行分页（§4.2）：`status=all|success|failed|skipped|pending`。
+
+    `after_seq` 是增量参数：只返回 seq 更大的行，供前端轮询时把
+    新完成的行插进列表顶部，不整页重拉（§5.3 的增量刷新）。
+    """
+    task = storage.get_task(task_id)
+    if task is None:
+        return fail(404, "任务不存在"), 404
+
+    status = (request.args.get("status") or "all").strip().lower()
+    if status not in storage.ITEM_FILTERS:
+        return fail(400, f"status 只能是 {' / '.join(storage.ITEM_FILTERS)}"), 400
+
+    page, page_size = parse_pagination(request.args)
+    after_seq = request.args.get("after_seq", 0, type=int) or 0
+
+    rows, total = storage.page_items(task["id"], status, after_seq,
+                                     page, page_size)
+    for r in rows:
+        # 失败码翻译成人话 + 可重试标记：前端据此决定行尾给 [重试] 还是 [忽略]
+        r["fail_message"] = describe(r["fail_reason"]) if r["fail_reason"] else ""
+        r["retryable"] = is_retryable(r["fail_reason"]) if r["fail_reason"] else None
+
+    return ok(paginated(rows, total, page, page_size))
+
+
+@bp.post("/tasks/<task_id>/pause")
+def pause_task(task_id):
+    """手动暂停（§5.3 的 [⏸ 暂停]）。已完成的保留，可从断点继续。"""
+    task = storage.get_task(task_id)
+    if task is None:
+        return fail(404, "任务不存在"), 404
+
+    if batch.is_running(task_id):
+        # 只设标志：正在处理的那条让它跑完，状态由线程自己落
+        batch.request_pause(task_id)
+        return ok({"task_id": task_id, "status": "pausing"},
+                  message="已请求暂停，正在收尾当前这一篇")
+    if task["status"] == "paused":
+        return ok({"task_id": task_id, "status": "paused"}, message="任务已是暂停状态")
+    if task["status"] != "running":
+        # done / cancelled / failed / queued：queued 没线程在跑，直接落库
+        if task["status"] == "queued":
+            storage.pause_task(task_id, batch.PAUSE_USER)
+            return ok({"task_id": task_id, "status": "paused"}, message="任务已暂停")
+        return fail(409, f"任务状态是 {task['status']}，不能暂停"), 409
+
+    # 库里是 running 但线程已经不在（进程重启等）：直接落库
+    storage.pause_task(task_id, batch.PAUSE_USER)
+    return ok({"task_id": task_id, "status": "paused"}, message="任务已暂停")
+
+
+@bp.post("/tasks/<task_id>/cancel")
+def cancel_task(task_id):
+    """取消任务（§4.2）：已完成的保留，剩下的留在 pending，cursor 保留供续跑。"""
+    task = storage.get_task(task_id)
+    if task is None:
+        return fail(404, "任务不存在"), 404
+    if task["status"] in ("done", "failed", "cancelled"):
+        return fail(409, f"任务已是终态（{task['status']}），无需取消"), 409
+
+    if batch.is_running(task_id):
+        batch.request_cancel(task_id)
+        return ok({"task_id": task_id, "status": "cancelling"},
+                  message="已请求取消，正在收尾当前这一篇")
+
+    storage.mark_status(task_id, "cancelled")
+    return ok({"task_id": task_id, "status": "cancelled"},
+              message=f"任务已取消，已完成的 {task['finished']} 条保留，"
+                      f"剩余 {task['total'] - task['finished']} 条未处理")
+
+
+def _task_summary(row):
+    """列表行与进度查询共用一套字段口径，前端两种入口读到的形状一致。"""
+    total = row["total"] or 0
+    finished = row["finished"] or 0
+    pause_reason = row["pause_reason"]
+    return {
+        "task_id": row["task_id"],
+        "type": row["type"],
+        "status": row["status"],
+        "stage": row["stage"],
+        "stage_label": STAGE_LABELS.get(row["stage"], row["stage"]),
+        "conference_code": row["conference_code"],
+        "year": row["year"],
+        "auto_commit": bool(row["auto_commit"]),
+        "total": total,
+        "finished": finished,
+        "percent": round(finished / total * 100, 1) if total else 0.0,
+        "success": row["success"],
+        "failed": row["failed"],
+        "skipped": row["skipped"],
+        "cursor": row["cursor"],
+        "pause_reason": pause_reason,
+        "pause_label": batch.pause_label(pause_reason),
+        "created_at": row["created_at"],
+        "finished_at": row["finished_at"],
+    }

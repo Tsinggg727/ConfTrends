@@ -41,11 +41,13 @@ PAUSE_BREAKER = "BREAKER_TRIPPED"
 PAUSE_FAILURES = "TOO_MANY_FAILURES"
 PAUSE_INTERNAL = "INTERNAL_ERROR"
 PAUSE_INTERRUPTED = "INTERRUPTED"
+PAUSE_USER = "USER_PAUSED"
 PAUSE_REASON_LABELS = {
     PAUSE_BREAKER: "站点拒绝服务（403/429），已按合规要求停手",
     PAUSE_FAILURES: "连续多条抓取失败，疑似站点改版或限流，已停手待确认",
     PAUSE_INTERNAL: "后台处理遇到未预期错误，已暂停（可从断点续跑）",
     PAUSE_INTERRUPTED: "上次运行中断（进程退出/崩溃），可从断点续跑",
+    PAUSE_USER: "用户手动暂停，可随时从断点继续",
 }
 
 
@@ -289,6 +291,20 @@ def forget(task_id):
         _threads.pop(task_id, None)
 
 
+def request_pause(task_id):
+    """请求暂停（§5.3 的 [⏸ 暂停]）。
+
+    只设标志不动库：正在跑的线程在下一条明细**开始前**看到它就停手，
+    当前这条让它处理完 —— 明细的原子性不受影响，状态由 run() 自己落。
+    """
+    _set_live(task_id, pause_requested=True)
+
+
+def request_cancel(task_id):
+    """请求取消（§4.2 的 /cancel）。与 request_pause 同一套协作机制。"""
+    _set_live(task_id, cancel_requested=True)
+
+
 def recover_stale_tasks(app):
     """进程启动时，把上次「跑着跑着进程死了」的任务标成 paused。
 
@@ -359,13 +375,17 @@ def run(app, task_id, fetcher=None):
         auto_commit = bool(task["auto_commit"])
         max_consecutive = cfg["CRAWL_BATCH_MAX_CONSECUTIVE_FAILURES"]
 
-        _set_live(task_id, current_title=None, pause_reason=None)
+        # 上一轮留下的暂停/取消标志必须清掉：resume 起的线程沿用同一个
+        # 注册表条目，不清的话新线程一进来就「看到取消」直接退出。
+        _set_live(task_id, current_title=None, pause_reason=None,
+                  pause_requested=False, cancel_requested=False)
         # 进度条上的阶段：每道题内部都会走一遍「检索 → 详情页」，
         # 但索引页有缓存，跑起来之后耗时几乎全在详情页，所以统一显示 enrich。
         storage.update_task(task_id, stage="enrich")
 
         consecutive_failures = 0
         pause_reason = None
+        cancelled = False
         try:
             # 按任务类型选「处理一条明细」的方式。unit 的整届清单通常已在
             # 阶段一装进索引缓存，这里再取一次是命中；但续跑时缓存可能已过期
@@ -389,6 +409,15 @@ def run(app, task_id, fetcher=None):
 
             # 只取 pending：断点续爬就是把上次没跑到的接着跑，成功的绝不重来
             for item in storage.pending_items(task["id"]):
+                # 用户点了暂停/取消：把当前这条处理完、下一条开始前停手
+                live = live_state(task_id)
+                if live.get("cancel_requested"):
+                    cancelled = True
+                    break
+                if live.get("pause_requested"):
+                    pause_reason = PAUSE_USER
+                    break
+
                 _set_live(task_id, current_title=item["input_title"])
                 ok, fetch_failed = process(item)
 
@@ -430,7 +459,10 @@ def run(app, task_id, fetcher=None):
         finally:
             _set_live(task_id, current_title=None)
 
-        if pause_reason:
+        if cancelled:
+            # 取消：已完成的保留，剩下的留在 pending，cursor 保留供续跑（§4.2）
+            storage.mark_status(task_id, "cancelled")
+        elif pause_reason:
             _set_live(task_id, pause_reason=pause_reason)
             storage.pause_task(task_id, pause_reason)
         else:

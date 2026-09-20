@@ -160,6 +160,19 @@ def find_active_task(conference_code, year):
     return dict(row) if row else None
 
 
+def list_tasks(page=1, page_size=10):
+    """历史任务列表（§4.2 GET /tasks）：新→旧分页。
+
+    前端「历史任务」面板用它，页面刷新后找回未完成任务也靠它。
+    """
+    total = query_one("SELECT COUNT(*) AS c FROM crawl_task")["c"]
+    rows = query_all(
+        "SELECT * FROM crawl_task ORDER BY id DESC LIMIT ? OFFSET ?",
+        (page_size, (page - 1) * page_size),
+    )
+    return [dict(r) for r in rows], total
+
+
 # ---------------------------------------------------------------
 # crawl_task_item
 # ---------------------------------------------------------------
@@ -244,6 +257,100 @@ def pending_items(task_row_id):
             WHERE task_id = ? AND status = 'pending' ORDER BY seq""",
         (task_row_id,),
     )]
+
+
+# 结果行分页允许的状态筛选（§4.2 items 的 status 参数）
+ITEM_FILTERS = ("all", "success", "failed", "skipped", "pending")
+
+# 「一条结果行」需要的全部字段：明细本身 + paper 三字段 + 会议信息。
+# 暂存模式（auto_commit=false）的 paper 还没进 paper 表，三字段从
+# parsed_json.paper 取；边爬边入库的行两者都有，以 paper 表为准（更新）。
+_ITEM_SELECT = """
+    SELECT i.seq, i.input_title, i.status, i.paper_id, i.fail_reason,
+           i.detail_url, i.pdf_url, i.parsed_json,
+           p.title AS paper_title, p.abstract AS paper_abstract,
+           p.url AS paper_url, p.year AS paper_year,
+           (SELECT GROUP_CONCAT(k.name, ',')
+              FROM paper_keyword pk JOIN keyword k ON k.id = pk.keyword_id
+             WHERE pk.paper_id = i.paper_id) AS keywords_csv,
+           c.code AS conference_code
+      FROM crawl_task_item i
+      LEFT JOIN paper p ON p.id = i.paper_id
+      LEFT JOIN conference c ON c.id = p.conference_id
+    """
+
+
+def page_items(task_row_id, status="all", after_seq=0, page=1, page_size=20):
+    """任务结果行分页（§4.2 GET /tasks/{id}/items），返回 `(行列表, 总数)`。
+
+    seq **倒序**：第 1 页永远是最新完成的 —— 轮询中的列表把新行插到
+    顶部即可，翻页语义也稳定（不会因为来了新行把后面的行挤到下一页）。
+
+    after_seq 供前端增量刷新：只取 seq 更大的行，拿到「自上次以来新完成」
+    的那几条，不必整页重拉 —— §5.3「增量刷新，不整表重渲染」的后端配合。
+    此时忽略分页（增量行数 ≤ 一次轮询间隔内完成的条数，量级很小）。
+    """
+    where = ["i.task_id = ?", "i.seq > ?"]
+    params = [task_row_id, after_seq]
+    if status != "all":
+        where.append("i.status = ?")
+        params.append(status)
+    clause = " AND ".join(where)
+
+    if after_seq:
+        rows = query_all(
+            f"{_ITEM_SELECT} WHERE {clause} ORDER BY i.seq DESC",
+            params,
+        )
+        return [_item_row(r) for r in rows], len(rows)
+
+    total = query_one(
+        f"""SELECT COUNT(*) AS c FROM crawl_task_item i WHERE {clause}""",
+        params,
+    )["c"]
+    rows = query_all(
+        f"{_ITEM_SELECT} WHERE {clause} ORDER BY i.seq DESC LIMIT ? OFFSET ?",
+        params + [page_size, (page - 1) * page_size],
+    )
+    return [_item_row(r) for r in rows], total
+
+
+def _item_row(r):
+    """把一行查询结果组装成给前端的形状（含暂存模式的三字段回退）。"""
+    d = dict(r)
+    try:
+        parsed = json.loads(d.pop("parsed_json") or "null")
+    except (ValueError, TypeError):
+        parsed = None
+    parsed = parsed or {}
+
+    # 暂存模式：parsed_json.paper 是三字段的唯一来源（「全部入库」之前）
+    staged = parsed.get("paper") or {}
+    paper = {
+        "title": d.get("paper_title") or staged.get("title") or d["input_title"],
+        "abstract": d.get("paper_abstract") or staged.get("abstract") or "",
+        "url": d.get("paper_url") or staged.get("url") or d.get("detail_url") or "",
+        "year": d.get("paper_year") or staged.get("year"),
+        "conference_code": d.get("conference_code")
+            or (staged.get("conference") or {}).get("code"),
+    }
+    keywords_csv = d.pop("keywords_csv") or ""
+    keywords = keywords_csv.split(",") if keywords_csv else \
+        [k.get("name") for k in staged.get("keywords") or [] if k.get("name")]
+
+    return {
+        "seq": d["seq"],
+        "input_title": d["input_title"],
+        "status": d["status"],
+        "paper_id": d["paper_id"],
+        "fail_reason": d["fail_reason"],
+        "detail_url": d["detail_url"],
+        "pdf_url": d["pdf_url"],
+        "matched_unit": parsed.get("matched_unit"),
+        "match_score": parsed.get("match_score"),
+        "paper": paper,
+        "keywords": keywords,
+    }
 
 
 def success_items(task_row_id):

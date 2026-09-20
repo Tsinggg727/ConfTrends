@@ -1,0 +1,36 @@
+/**
+ * 可抓取单元日历 —— 与后端 crawl/units.py 的 CONFERENCE_UNITS 保持一致。
+ *
+ * ECCV 2026 尚未在 ECVA 发布（截至 2026-09），后端放榜后加一行，这里同步。
+ */
+export const CONFERENCE_UNITS = {
+  CVPR: [2022, 2023, 2024, 2025, 2026],
+  ICCV: [2023, 2025],
+  ECCV: [2022, 2024],
+}
+
+export const CONFERENCE_CODES = Object.keys(CONFERENCE_UNITS)
+
+/** 任务状态 → 展示文案与 Element Plus tag 类型 */
+export const STATUS_META = {
+  queued: { label: '排队中', tag: 'info' },
+  running: { label: '运行中', tag: 'primary' },
+  pausing: { label: '暂停中…', tag: 'warning' },
+  cancelling: { label: '取消中…', tag: 'warning' },
+  paused: { label: '已暂停', tag: 'warning' },
+  done: { label: '已完成', tag: 'success' },
+  cancelled: { label: '已取消', tag: 'info' },
+  failed: { label: '已失败', tag: 'danger' },
+}
+
+/** 任务类型 → 展示文案 */
+export const TYPE_LABELS = {
+  single: '单条爬取',
+  batch_titles: '批量题目',
+  bibtex: 'BibTeX 导入',
+  unit: '整届导入',
+}
+
+export function statusMeta(status) {
+  return STATUS_META[status] || { label: status, tag: 'info' }
+}

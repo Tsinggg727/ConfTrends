@@ -445,3 +445,174 @@ def test_API_同会议年份已有任务返回409(app, client):
 
 def test_API_任务不存在返回404(client):
     assert client.get("/api/v1/tasks/00000000-0000-0000-0000-000000000000").status_code == 404
+
+
+# ---------------------------------------------------------------
+# 任务列表 / 结果行分页 / 暂停 / 取消（§4.2 + §5.3 前端页面的数据源）
+# ---------------------------------------------------------------
+def test_API_任务列表分页新任务在前(app, client):
+    make_task(app, [TITLE], conference_code="CVPR", year=2024)
+    make_task(app, [SPARSE], conference_code="CVPR", year=2023)
+
+    resp = client.get("/api/v1/tasks?page=1&page_size=1")
+    assert resp.status_code == 200
+    data = resp.get_json()["data"]
+    assert data["total"] == 2 and data["pages"] == 2
+    assert data["list"][0]["year"] == 2023            # 新任务在前
+    assert data["list"][0]["stage_label"]             # 阶段文案随行带出
+
+
+def test_API_结果行分页与状态筛选(app, client):
+    task = make_task(app, [MISSING, TITLE, SPARSE])
+    with app.app_context():
+        batch.run(app, task["task_id"], fetcher=cvf_fetcher())
+
+    all_rows = client.get(f"/api/v1/tasks/{task['task_id']}/items") \
+        .get_json()["data"]
+    assert all_rows["total"] == 3
+    assert all_rows["list"][0]["seq"] == 3            # 新完成的在前
+
+    failed = client.get(
+        f"/api/v1/tasks/{task['task_id']}/items?status=failed") \
+        .get_json()["data"]
+    assert failed["total"] == 1
+    row = failed["list"][0]
+    assert row["input_title"] == MISSING
+    assert row["fail_reason"] == "NOT_FOUND_CVF"
+    assert "完整标题" in row["fail_message"]
+    assert row["retryable"] is False                  # 前端据此给 [忽略] 而非 [重试]
+
+    bad = client.get(
+        f"/api/v1/tasks/{task['task_id']}/items?status=nope")
+    assert bad.status_code == 400
+
+
+def test_API_结果行_暂存模式三字段回退parsed_json(app, client):
+    task = make_task(app, [TITLE])
+    with app.app_context():
+        batch.run(app, task["task_id"], fetcher=cvf_fetcher())
+
+    row = client.get(f"/api/v1/tasks/{task['task_id']}/items") \
+        .get_json()["data"]["list"][0]
+    # paper 还没入库，三字段来自 parsed_json.paper
+    assert row["paper"]["title"] == TITLE
+    assert row["paper"]["abstract"]
+    assert row["paper"]["conference_code"] == "CVPR"
+    assert row["matched_unit"] == "CVPR 2024"
+
+
+def test_API_结果行_边爬边入库三字段来自paper表(app, db, client):
+    with app.app_context():
+        task = storage.create_task("unit", "CVPR", 2024, True, total=1)
+        storage.create_items(task["id"], [TITLE])
+        batch.run(app, task["task_id"], fetcher=cvf_fetcher())
+
+    row = client.get(f"/api/v1/tasks/{task['task_id']}/items") \
+        .get_json()["data"]["list"][0]
+    assert row["paper_id"] is not None
+    assert row["paper"]["title"] == TITLE
+    assert row["paper"]["abstract"]
+    assert row["keywords"] == []                      # 关键词抽取是阶段五，暂为空
+
+
+def test_API_结果行_after_seq只取增量(app, client):
+    task = make_task(app, [MISSING, TITLE, SPARSE])
+    with app.app_context():
+        batch.run(app, task["task_id"], fetcher=cvf_fetcher())
+
+    resp = client.get(
+        f"/api/v1/tasks/{task['task_id']}/items?after_seq=2&status=success") \
+        .get_json()["data"]
+    assert resp["total"] == 1                         # seq>2 且成功的只有 SPARSE
+    assert resp["list"][0]["seq"] == 3
+
+
+def test_手动暂停_下一条开始前停手(app, db):
+    task = make_task(app, [TITLE, SPARSE])
+    # 模拟真实时序：线程跑着的时候用户点 [⏸ 暂停] —— 第一条 detail 抓完、
+    # 第二条还没开始时标志生效。（run() 开头会清掉上一轮遗留的标志，
+    # 在 run 之前设标志会被清掉，那是 resume 的语义不是暂停。）
+    fake = cvf_fetcher()
+    real_get_detail = fake.get_detail
+
+    def get_detail_then_pause(url):
+        result = real_get_detail(url)
+        batch.request_pause(task["task_id"])
+        return result
+
+    fake.get_detail = get_detail_then_pause
+    with app.app_context():
+        batch.run(app, task["task_id"], fetcher=fake)
+
+    row = db.execute("SELECT status, pause_reason, finished FROM crawl_task "
+                     "WHERE task_id = ?", (task["task_id"],)).fetchone()
+    assert (row["status"], row["pause_reason"], row["finished"]) == \
+        ("paused", batch.PAUSE_USER, 1)
+    pending = db.execute(
+        "SELECT COUNT(*) AS c FROM crawl_task_item WHERE status = 'pending'"
+    ).fetchone()["c"]
+    assert pending == 1
+
+    # 再跑一次（不请求暂停）能正常跑完 —— 暂停没堵死续跑
+    with app.app_context():
+        batch.run(app, task["task_id"], fetcher=cvf_fetcher())
+    row = db.execute("SELECT status, finished FROM crawl_task "
+                     "WHERE task_id = ?", (task["task_id"],)).fetchone()
+    assert (row["status"], row["finished"]) == ("done", 2)
+
+
+def test_API_pause_状态机边界(app, client):
+    task = make_task(app, [TITLE])
+    with app.app_context():
+        storage.pause_task(task["task_id"], batch.PAUSE_BREAKER)
+    # 已是 paused：幂等返回 200
+    assert client.post(f"/api/v1/tasks/{task['task_id']}/pause").status_code == 200
+
+    with app.app_context():
+        storage.mark_status(task["task_id"], "done")
+    # 终态不能暂停
+    assert client.post(f"/api/v1/tasks/{task['task_id']}/pause").status_code == 409
+    # 库里 running 但线程不在（进程重启过）：直接落库成 paused
+    with app.app_context():
+        storage.update_task(task["task_id"], status="running")
+    resp = client.post(f"/api/v1/tasks/{task['task_id']}/pause")
+    assert resp.status_code == 200
+    assert resp.get_json()["data"]["status"] == "paused"
+
+
+def test_手动取消_已完成保留剩余留pending(app, db):
+    task = make_task(app, [TITLE, SPARSE])
+    # 与暂停测试同一时序：第一条 detail 抓完后请求取消
+    fake = cvf_fetcher()
+    real_get_detail = fake.get_detail
+
+    def get_detail_then_cancel(url):
+        result = real_get_detail(url)
+        batch.request_cancel(task["task_id"])
+        return result
+
+    fake.get_detail = get_detail_then_cancel
+    with app.app_context():
+        batch.run(app, task["task_id"], fetcher=fake)
+
+    row = db.execute("SELECT status, finished, success FROM crawl_task "
+                     "WHERE task_id = ?", (task["task_id"],)).fetchone()
+    assert (row["status"], row["finished"], row["success"]) == ("cancelled", 1, 1)
+    # 取消后能从断点续跑（§4.2：cursor 保留供续跑）
+    with app.app_context():
+        batch.run(app, task["task_id"], fetcher=cvf_fetcher())
+    row = db.execute("SELECT status, finished FROM crawl_task "
+                     "WHERE task_id = ?", (task["task_id"],)).fetchone()
+    assert (row["status"], row["finished"]) == ("done", 2)
+
+
+def test_API_cancel_终态返回409_非运行直接落库(app, client):
+    task = make_task(app, [TITLE])
+    with app.app_context():
+        storage.mark_status(task["task_id"], "done")
+    assert client.post(f"/api/v1/tasks/{task['task_id']}/cancel").status_code == 409
+
+    task2 = make_task(app, [SPARSE])
+    resp = client.post(f"/api/v1/tasks/{task2['task_id']}/cancel")
+    assert resp.status_code == 200
+    assert resp.get_json()["data"]["status"] == "cancelled"
