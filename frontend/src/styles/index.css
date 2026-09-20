@@ -1,0 +1,58 @@
+/* 全局样式与设计令牌 —— 色值取自《原型设计初稿 v3》§3.1 */
+:root {
+  --ct-navy: #0f172a;      /* 导航底 / 深色区 */
+  --ct-primary: #3b82f6;   /* 主色 科技蓝 */
+  --ct-secondary: #8b5cf6; /* 辅色 紫 */
+  --ct-accent: #f59e0b;    /* 强调 Top1 高亮 */
+  --ct-bg: #f5f7fa;
+  --ct-card: #ffffff;
+  --ct-text: #1f2937;
+  --ct-text-sub: #6b7280;
+  --ct-success: #10b981;
+  --ct-danger: #ef4444;
+  --ct-radius: 12px;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--ct-bg);
+  color: var(--ct-text);
+  font-family: 'Microsoft YaHei', 'PingFang SC', 'Helvetica Neue', Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 数字与英文用等宽，图表里更整齐 */
+.ct-num {
+  font-family: Inter, 'JetBrains Mono', Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 圆角卡片 + 轻阴影 */
+.ct-card {
+  background: var(--ct-card);
+  border-radius: var(--ct-radius);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06), 0 8px 24px rgba(15, 23, 42, 0.04);
+  padding: 20px;
+}
+
+/* 页面级占位块，骨架阶段给未实现的页面用 */
+.ct-placeholder {
+  min-height: 320px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--ct-text-sub);
+}
+.ct-placeholder .ct-ph-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--ct-text);
+}

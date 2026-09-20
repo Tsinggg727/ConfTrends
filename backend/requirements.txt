@@ -1,0 +1,8 @@
+Flask>=3.0
+flask-cors>=4.0
+requests>=2.31
+beautifulsoup4>=4.12
+# lxml 不是可选项：索引页 5–7 MB，html.parser 解析慢一个数量级。
+# common.py 里有 html.parser 回退，但那只保证「装不上也能跑」，不保证跑得动。
+lxml>=5.0
+pytest>=8.0
