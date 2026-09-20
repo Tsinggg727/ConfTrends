@@ -6,8 +6,9 @@
     POST /api/v1/tasks/<task_id>/commit   暂存模式的「全部入库」
     POST /api/v1/tasks/<task_id>/resume   从断点续跑
 
-`POST /papers/import` 的 `type` 目前只实现 `titles`；`bibtex` / `unit` 属
-设计文档 §6.1 步骤 4 及以后，接口先按「参数不认识」明确拒绝，不假装能用。
+`POST /papers/import` 的 `type` 支持 `titles`（步骤 3）/ `bibtex` / `unit`
+（步骤 4）。三种输入共用一条调度链：解析输入 → 建任务与明细 → 后台线程边爬边写，
+进度查 `GET /tasks/<task_id>`。
 
 **响应约定**：业务失败（题目没找到、摘要为空）返回 HTTP 200 +
 `data.status = "failed"`，只有参数本身不合法才用 4xx ——
@@ -85,19 +86,17 @@ def crawl_paper():
 # ---------------------------------------------------------------
 @bp.post("/papers/import")
 def import_papers():
-    """批量导入（§4.1 ②）。
+    """批量导入（§4.1 ②）—— titles / bibtex / unit 三种输入的统一下单口。
 
-    请求体二选一，参数相同：
-
-        application/json      {"type": "titles",
-                               "text": "题目一\\n题目二",
-                               "conference_code": "CVPR", "year": 2024,
-                               "auto_commit": false}
-        multipart/form-data   把 text 换成 file（.txt / .csv，CSV 只取第一列）
+      titles   给 text 或 file(.txt/.csv)，默认暂存（auto_commit=false）；
+      bibtex   给 file(.bib)，conference_code + year 必填，默认边爬边入库；
+      unit     不给内容，只给 conference_code + year，平台自己拉整届清单，
+               默认边爬边入库。
 
     `titles` 默认 `auto_commit=false`：先暂存，用户看过匹配结果再走
     `POST /tasks/<id>/commit` 一次入库 —— 50 条里有 3 条匹配错了，
-    不该在用户看见之前就已经写进 paper 表。
+    不该在用户看见之前就已经写进 paper 表。bibtex / unit 动辄几千条，
+    默认边爬边入库，崩溃时已完成的部分不丢。
 
     解析完立刻返回 `task_id` 和「识别到 N 条」，抓取在后台线程里跑，
     进度查 `GET /tasks/<task_id>`。
@@ -114,25 +113,16 @@ def import_papers():
             return fail(400, "请求体必须是 JSON 对象"), 400
 
     task_type = (payload.get("type") or "").strip().lower()
-    if not task_type:
-        return fail(400, "缺少 type 参数（本步骤支持 titles）"), 400
-    if task_type != "titles":
-        return fail(400, f"type={task_type} 尚未实现，本步骤只支持 titles"), 400
+    if task_type not in ("titles", "bibtex", "unit"):
+        return fail(400, f"type={task_type or '空'} 不支持，"
+                         f"可选 titles / bibtex / unit"), 400
 
+    # bibtex / unit 必须明确会议 + 年份；titles 两个都可以不给（依次找 9 个单元）
     try:
-        text = batch.read_upload(upload) if upload is not None else (payload.get("text") or "")
-        conference_code, year = _target(payload)
+        conference_code, year = _target_required(payload) \
+            if task_type in ("bibtex", "unit") else _target(payload)
     except InvalidParam as exc:
         return fail(exc.code, exc.message), exc.code
-
-    if not text.strip():
-        return fail(400, "没有收到内容：给 text 字段，或用 file 上传 .txt / .csv"), 400
-
-    titles, warnings = batch.parse_titles(text)
-    if not titles:
-        return fail(400, "没有从内容里解析出任何题目"), 400
-    if len(titles) > batch.MAX_TITLES:
-        return fail(400, f"题目行数 {len(titles)} 超过上限 {batch.MAX_TITLES}"), 400
 
     # 同一 (会议, 年份) 上已有没跑完的任务：别重复消耗同一批配额（§4.1 ②）
     existing = storage.find_active_task(conference_code, year)
@@ -141,15 +131,29 @@ def import_papers():
                          f"{existing['task_id']}（{existing['status']}），"
                          f"请先续跑它或等它跑完"), 409
 
+    # titles 只走「暂存 + 全部入库」，强制 false —— 免得用户传 true 得到
+    # 一个「跑完却不写 paper、又不能走 commit」的死任务。bibtex/unit 默认 true。
+    auto_commit = _auto_commit(payload, default=True) \
+        if task_type in ("bibtex", "unit") else False
+
+    try:
+        titles, warnings = _extract_titles(task_type, payload, upload,
+                                           conference_code, year)
+    except InvalidParam as exc:
+        return fail(exc.code, exc.message), exc.code
+    except CrawlError as exc:
+        # unit 阶段一拉整届清单失败（网络/429 熔断）：这是上游不可用，不是参数错
+        return fail(503, f"拉取整届清单失败：{exc.message}，请稍后重试"), 503
+
+    if len(titles) > batch.MAX_TITLES:
+        return fail(400, f"论文数 {len(titles)} 超过上限 {batch.MAX_TITLES}"), 400
+
     warnings += _slow_batch_warnings(conference_code, year)
 
-    # titles 类型本步骤只走「暂存 + 全部入库」，不做边爬边入库。
-    # 强制 false，免得用户传了 true 得到一个「跑完却不写 paper、
-    # 又不能走 commit」的死任务。auto_commit=true 留给 bibtex/unit（步骤 4+）。
-    auto_commit = False
-    # 库里的 type 用 §3.3 的枚举 batch_titles（区别于 API 输入参数 titles），
-    # 与 crawl_single 的 single 对应：一个是「单条」，一个是「批量题目」。
-    task = storage.create_task("batch_titles", conference_code, year, auto_commit,
+    # 库里的 type 用 §3.3 的枚举：API 的 titles 存成 batch_titles，
+    # bibtex / unit 与输入同名，和 crawl_single 的 single 对应。
+    stored_type = "batch_titles" if task_type == "titles" else task_type
+    task = storage.create_task(stored_type, conference_code, year, auto_commit,
                                total=len(titles))
     storage.create_items(task["id"], titles)
 
@@ -163,7 +167,7 @@ def import_papers():
         "status": task["status"],
         "poll_url": f"/api/v1/tasks/{task['task_id']}",
         "warnings": warnings,
-    }, message=f"识别到 {len(titles)} 条题目，已开始抓取")
+    }, message=f"识别到 {len(titles)} 条，已开始抓取")
 
 
 def _target(payload):
@@ -185,6 +189,63 @@ def _target(payload):
     if not units_for(code, year):
         raise InvalidParam("没有匹配的会议-年份组合")
     return code, year
+
+
+def _target_required(payload):
+    """bibtex / unit 必须明确会议 + 年份。"""
+    code, year = _target(payload)
+    if not code:
+        raise InvalidParam("bibtex / unit 类型必须给 conference_code")
+    if year is None:
+        raise InvalidParam("bibtex / unit 类型必须给 year")
+    return code, year
+
+
+def _auto_commit(payload, default=False):
+    """取 auto_commit：没传用默认值；multipart 表单里它是个字符串，得显式解析。"""
+    value = payload.get("auto_commit")
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
+def _extract_titles(task_type, payload, upload, conference_code, year):
+    """按 type 把输入变成去重后的题目列表，返回 `(titles, warnings)`。
+
+    参数不合法抛 InvalidParam（→ 4xx）；unit 阶段一拉整届清单失败抛 CrawlError
+    （由调用方转成 503）。
+    """
+    if task_type == "titles":
+        text = batch.read_upload(upload) if upload is not None \
+            else (payload.get("text") or "")
+        if not text.strip():
+            raise InvalidParam("没有收到内容：给 text 字段，或用 file 上传 .txt / .csv")
+        titles, warnings = batch.parse_titles(text)
+        if not titles:
+            raise InvalidParam("没有从内容里解析出任何题目")
+        return titles, warnings
+
+    if task_type == "bibtex":
+        if upload is None:
+            raise InvalidParam("bibtex 类型必须用 file 上传 .bib 文件")
+        text = batch.read_bib_upload(upload)
+        titles, warnings = batch.parse_bibtex(text)
+        if not titles:
+            raise InvalidParam("没有从 .bib 里解析出任何论文")
+        return titles, warnings
+
+    # unit：平台自己去列表页拉整届清单（阶段一，结果进索引缓存供阶段二复用）
+    if upload is not None:
+        raise InvalidParam("unit 类型不需要上传文件，只给 conference_code + year")
+    unit = units_for(conference_code, year)[0]
+    # load_index 的形参是 (unit, fetcher)：两个都是对象，传反了要到运行时才暴露
+    entries, _index, _cached = service.load_index(unit, service.get_fetcher())
+    titles = batch.titles_from_entries(entries)
+    if not titles:
+        raise InvalidParam(f"{unit.label} 的列表页没有解析出任何论文")
+    return titles, []
 
 
 def _target_label(task):

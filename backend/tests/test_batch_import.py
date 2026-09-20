@@ -410,10 +410,10 @@ def test_API_resume_已跑完返回409(app, client):
 
 
 def test_API_type未实现返回400(app, client):
-    resp = client.post("/api/v1/papers/import", json={"type": "bibtex",
+    resp = client.post("/api/v1/papers/import", json={"type": "ris",
                                                       "text": "x"})
     assert resp.status_code == 400
-    assert "尚未实现" in resp.get_json()["message"]
+    assert "不支持" in resp.get_json()["message"]
 
 
 def test_API_空内容返回400(app, client):
@@ -430,16 +430,17 @@ def test_API_会议年份不存在返回400(app, client):
 
 
 def test_API_同会议年份已有任务返回409(app, client):
+    # 前置任务直接落库（queued / running / paused 都算「没跑完」），不起真线程：
+    # 真任务在零间隔 FakeFetcher 下毫秒级跑完，和下一个请求赛跑的结果不稳定。
+    # find_active_task 只认库里的状态，这样构造的前置条件和真跑一等价。
+    make_task(app, [TITLE], conference_code="CVPR", year=2024)
+
     text = f"{TITLE}\n{SPARSE}"
-    first = _post_import(client, app, cvf_fetcher(), type="titles", text=text,
-                         conference_code="CVPR", year=2024)
-    # 第二个任务：同一 (CVPR, 2024) 上第一个还没跑完
     second = client.post("/api/v1/papers/import",
                          json={"type": "titles", "text": text,
                                "conference_code": "CVPR", "year": 2024})
     assert second.status_code == 409
     assert "任务" in second.get_json()["message"]
-    wait_finished(app, first.get_json()["data"]["task_id"])
 
 
 def test_API_任务不存在返回404(client):

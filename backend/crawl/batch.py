@@ -1,4 +1,4 @@
-"""批量导入的异步执行 —— 设计文档 §6.1 步骤 3。
+"""批量导入的异步执行 —— 设计文档 §6.1 步骤 3（titles）与步骤 4（bibtex / unit）。
 
 **为什么是「线程 + 数据库」而不是 Celery**：单进程课程项目，为了异步引一个
 broker 是纯粹的负担。但异步任务的**状态不能只放内存** —— Flask debug 模式一
@@ -16,6 +16,7 @@ crawl_task / crawl_task_item 里；内存里那份注册表只放「现在正在
 import csv
 import io
 import os
+import re
 import threading
 import time
 
@@ -25,6 +26,7 @@ from db import transaction
 
 from . import service, storage
 from .fail_reason import CrawlError, InvalidParam
+from .parsers.common import clean_text
 from .textutil import normalize_title
 from .units import units_for
 
@@ -97,6 +99,19 @@ def read_upload(file_storage):
     return _first_column(text) if suffix == ".csv" else text
 
 
+def read_bib_upload(file_storage):
+    """读上传的 .bib 文件。参数不合法抛 InvalidParam（→ 4xx）。"""
+    name = (file_storage.filename or "").strip()
+    suffix = os.path.splitext(name)[1].lower()
+    if suffix != ".bib":
+        raise InvalidParam(f"BibTeX 只支持 .bib 文件，收到的是「{name or '无文件名'}」")
+
+    raw = file_storage.read(MAX_UPLOAD_BYTES + 1)      # 多读 1 字节即可判断超限
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise InvalidParam(f"文件超过 {MAX_UPLOAD_BYTES // 1024 // 1024} MB 上限")
+    return _decode(raw)
+
+
 def parse_titles(text):
     """一段文本 → 题目列表，返回 `(titles, warnings)`。
 
@@ -138,6 +153,105 @@ def parse_titles(text):
     if too_long:
         warnings.append(f"{too_long} 行超过 {MAX_TITLE_LEN} 字符，已跳过")
     return titles, warnings
+
+
+# BibTeX 记录以 @type{ 开头，整个记录是一个花括号配对块（title 里带花括号很常见）
+_ENTRY_RE = re.compile(r"@\w+\s*\{")
+
+
+def _split_bib_entries(text):
+    """把 .bib 文本切成一条条记录（顶层 @type{...} 块，花括号配对）。"""
+    entries, i, n = [], 0, len(text or "")
+    while i < n:
+        m = _ENTRY_RE.search(text, i)
+        if not m:
+            break
+        start, open_pos = m.start(), m.end() - 1      # open_pos 指向 '{'
+        depth, j = 0, open_pos
+        while j < n:
+            if text[j] == "{":
+                depth += 1
+            elif text[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        entries.append(text[start:j + 1])
+        i = j + 1
+    return entries
+
+
+# title 的取值可以是 {...} 或 "..." 两种，值定界符在 = 号之后
+_TITLE_RE = re.compile(r"\btitle\s*=\s*([{\"])", re.IGNORECASE)
+
+
+def _bib_title(entry):
+    """取一条 BibTeX 记录的 title 字段，兼容 {...} 与 "..." 两种取值。"""
+    m = _TITLE_RE.search(entry)
+    if not m:
+        return ""
+    if m.group(1) == "{":
+        # 花括号配对扫描 —— 标题里带花括号很常见（title = {A {3D} Approach}）
+        i, depth, start = m.end(), 1, m.end()
+        while i < len(entry) and depth > 0:
+            if entry[i] == "{":
+                depth += 1
+            elif entry[i] == "}":
+                depth -= 1
+            i += 1
+        return clean_text(entry[start:i - 1])
+    end = entry.find('"', m.end())
+    return clean_text(entry[m.end():end]) if end != -1 else ""
+
+
+def parse_bibtex(text):
+    """一段 .bib 文本 → 题目列表，返回 `(titles, warnings)`。
+
+    从每个 @...{...} 记录里取 `title` 字段，再复刻 parse_titles 的去重/超长检查。
+    LaTeX 转义留在题目原文里 —— normalize_title 在匹配阶段会剥掉它，这里不提前破坏。
+    """
+    titles, warnings = [], []
+    seen, no_title, duplicates, too_long = set(), 0, 0, 0
+    entries = _split_bib_entries(text)
+
+    for entry in entries:
+        title = _bib_title(entry)
+        if not title:
+            no_title += 1
+            continue
+        if len(title) > MAX_TITLE_LEN:
+            too_long += 1
+            continue
+        key = normalize_title(title)
+        if key in seen:
+            duplicates += 1
+            continue
+        seen.add(key)
+        titles.append(title)
+
+    if not entries:
+        warnings.append("没有解析出任何 BibTeX 记录（@type{...}）")
+    if no_title:
+        warnings.append(f"{no_title} 条记录缺 title 字段，已跳过")
+    if duplicates:
+        warnings.append(f"{duplicates} 条记录的题目重复（按归一化题目去重），已合并")
+    if too_long:
+        warnings.append(f"{too_long} 条题目超过 {MAX_TITLE_LEN} 字符，已跳过")
+    return titles, warnings
+
+
+def titles_from_entries(entries):
+    """整届清单 → 去重后的题目列表（unit 模式阶段一用）。
+
+    与 build_index 同一条去重口径：同一届里归一化题目相同的只保留先出现的。
+    """
+    titles, seen = [], set()
+    for e in entries:
+        key = normalize_title(e["title"])
+        if key and key not in seen:
+            seen.add(key)
+            titles.append(e["title"])
+    return titles
 
 
 # ---------------------------------------------------------------
@@ -230,6 +344,9 @@ def run(app, task_id, fetcher=None):
 
     **同步执行**：线程只是它的壳。测试直接调这个函数，不必和线程调度赛跑；
     接口层通过 start() 调它。
+
+    titles / bibtex 两种走「给题目去索引页找」；unit 走「整届清单直接逐条抓」。
+    除此之外的调度（断点续爬、熔断停手、计数）三者完全一致。
     """
     with app.app_context():
         task = storage.get_task(task_id)
@@ -239,7 +356,7 @@ def run(app, task_id, fetcher=None):
         cfg = current_app.config
         fetcher = fetcher or service.get_fetcher()
         units = units_for(task["conference_code"], task["year"])
-        item_deadline = cfg["CRAWL_SINGLE_DEADLINE_SEC"] or None
+        auto_commit = bool(task["auto_commit"])
         max_consecutive = cfg["CRAWL_BATCH_MAX_CONSECUTIVE_FAILURES"]
 
         _set_live(task_id, current_title=None, pause_reason=None)
@@ -247,13 +364,30 @@ def run(app, task_id, fetcher=None):
         # 但索引页有缓存，跑起来之后耗时几乎全在详情页，所以统一显示 enrich。
         storage.update_task(task_id, stage="enrich")
 
+        # 按任务类型选「处理一条明细」的方式。unit 的整届清单已在阶段一装进
+        # 索引缓存，这里再取一次是 cache 命中，不会重拉 5–7 MB 的页面。
+        if task["type"] == "unit":
+            unit = units[0]
+            entries, _index, _cached = service.load_index(unit, fetcher)
+            entry_by_key = {normalize_title(e["title"]): e for e in entries}
+
+            def process(item):
+                return _process_unit_item(item, unit, entry_by_key, fetcher,
+                                          auto_commit)
+        else:
+            item_deadline = cfg["CRAWL_SINGLE_DEADLINE_SEC"] or None
+
+            def process(item):
+                return _process_item(item, units, fetcher, item_deadline,
+                                     auto_commit)
+
         consecutive_failures = 0
         pause_reason = None
         try:
             # 只取 pending：断点续爬就是把上次没跑到的接着跑，成功的绝不重来
             for item in storage.pending_items(task["id"]):
                 _set_live(task_id, current_title=item["input_title"])
-                ok, fetch_failed = _process_item(item, units, fetcher, item_deadline)
+                ok, fetch_failed = process(item)
 
                 if ok:
                     storage.bump_task(task_id, cursor=item["seq"],
@@ -289,20 +423,16 @@ def run(app, task_id, fetcher=None):
             storage.pause_task(task_id, pause_reason)
         else:
             # 计数是 bump_task 一路累加的，这里只改状态和时间
-            storage.mark_status(
-                task_id, "done",
-                stage="commit" if task["auto_commit"] else "enrich")
+            storage.mark_status(task_id, "done",
+                                stage="commit" if auto_commit else "enrich")
 
         return storage.get_task(task_id)
 
 
-def _process_item(item, units, fetcher, deadline_sec):
-    """处理一条明细：检索 → 匹配 → 组装 → 落 parsed_json。
+def _process_item(item, units, fetcher, deadline_sec, auto_commit):
+    """处理一条「按题目检索」的明细（titles / bibtex）。
 
     返回 `(是否成功, 失败是否属于抓取层面)`。
-
-    暂存模式（auto_commit=false）下 paper 不写库，只落 parsed_json ——
-    用户点「全部入库」时，那份解析结果是**唯一**的数据来源（§1.4 阶段六）。
     """
     title = (item["input_title"] or "").strip()
     deadline = time.monotonic() + deadline_sec if deadline_sec else None
@@ -317,18 +447,76 @@ def _process_item(item, units, fetcher, deadline_sec):
         )
         return False, res.fetch_failed
 
-    paper = res.paper
-    storage.finish_item(
-        item["id"], "success",
-        fail_reason=paper.get("fail_reason"),
-        detail_url=paper.get("url"),
-        pdf_url=paper.get("pdf_url"),
-        parsed={"input_title": title, "matched_unit": res.unit.label,
-                "match_score": paper["match_score"],
-                "match_reason": paper["match_reason"],
-                "paper": paper, "warnings": res.warnings},
-    )
+    return _succeed(item, res.paper, res.unit.label, res.warnings, auto_commit)
+
+
+def _process_unit_item(item, unit, entry_by_key, fetcher, auto_commit):
+    """处理一条「整届清单」的明细（unit 模式）：条目直接来自索引页，无需标题匹配。"""
+    title = (item["input_title"] or "").strip()
+    entry = entry_by_key.get(normalize_title(title))
+    if entry is None:
+        storage.finish_item(item["id"], "failed", fail_reason="NOT_FOUND_CVF",
+                            parsed={"input_title": title})
+        return False, False
+
+    paper, warnings = service.build_paper(unit, entry, fetcher)
+    paper["match_score"] = 1.0          # 条目直接来自列表页，匹配无歧义
+    paper["match_reason"] = "exact"
+    return _succeed(item, paper, unit.label, warnings, auto_commit)
+
+
+def _succeed(item, paper, unit_label, warnings, auto_commit):
+    """一条明细成功落定。
+
+    auto_commit=true 直接写库（明细指回 paper_id）；false 则把 paper 暂存进
+    parsed_json，等「全部入库」再写。两种模式下 paper 都不会丢，只是时点不同。
+    """
+    paper_id = None
+    if auto_commit:
+        paper_id, _ = _store_paper(item["id"], paper)
+
+    parsed = {
+        "input_title": (item["input_title"] or "").strip(),
+        "matched_unit": unit_label,
+        "match_score": paper.get("match_score"),
+        "match_reason": paper.get("match_reason"),
+        "warnings": warnings,
+    }
+    if not auto_commit:
+        # 暂存模式：parsed_json 里的 paper 是「全部入库」唯一的数据来源，必须写全
+        parsed["paper"] = paper
+
+    storage.finish_item(item["id"], "success", paper_id=paper_id,
+                        fail_reason=paper.get("fail_reason"),
+                        detail_url=paper.get("url"),
+                        pdf_url=paper.get("pdf_url"),
+                        parsed=parsed)
     return True, False
+
+
+def _store_paper(item_id, paper):
+    """auto_commit=true：把一篇论文直接写 paper 表 + 关键词关联。
+
+    与 commit_staged 的差别是**逐条入库**（边爬边写，不经 parsed_json 暂存）——
+    崩溃时已经写完的那部分不丢，剩下的留在 pending 从断点续跑。
+    """
+    paper = dict(paper)
+    paper["conference_id"] = _conference_id(paper)
+    paper_id, action = storage.upsert_paper(paper)
+    storage.attach_paper(item_id, paper_id)
+    storage.link_keywords(paper_id, paper.get("keywords") or [])
+    return paper_id, action
+
+
+def _conference_id(paper):
+    code = paper.get("conference_code")
+    conf = storage.conference_info(code)
+    if conf is None:
+        raise CrawlError(
+            "CONFERENCE_UNKNOWN",
+            f"会议表里没有 {code}，请先执行 python scripts/init_db.py",
+        )
+    return conf["id"]
 
 
 # ---------------------------------------------------------------
@@ -349,16 +537,8 @@ def commit_staged(task_id):
             if not paper:
                 continue              # 早期任务可能没把 parsed_json 写全，跳过而不是崩
 
-            code = paper.get("conference_code")
-            conf = storage.conference_info(code)
-            if conf is None:
-                raise CrawlError(
-                    "CONFERENCE_UNKNOWN",
-                    f"会议表里没有 {code}，请先执行 python scripts/init_db.py",
-                )
-
             paper = dict(paper)               # 不改动 parsed_json 里那份
-            paper["conference_id"] = conf["id"]
+            paper["conference_id"] = _conference_id(paper)
             paper_id, action = storage.upsert_paper(paper, commit=False)
             storage.attach_paper(item["id"], paper_id, commit=False)
             counts["skipped_dup" if action == "skipped" else action] += 1

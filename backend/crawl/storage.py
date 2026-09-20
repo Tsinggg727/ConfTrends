@@ -10,6 +10,8 @@ import uuid
 
 from db import execute, execute_many, query_all, query_one
 
+from .textutil import normalize_title
+
 
 def _now():
     # 统一走 SQLite 的 CURRENT_TIMESTAMP，避免 Python 本地时区混进库
@@ -335,3 +337,36 @@ def upsert_paper(p, commit=True):
         commit=commit,
     )
     return row["id"], "updated"
+
+
+def link_keywords(paper_id, keywords, commit=True):
+    """写论文-关键词关联：keyword 不存在则建，再插 paper_keyword（UNIQUE 去重）。
+
+    关键词**抽取**（阶段五，TF-IDF/TextRank）不在本模块范围，`keywords` 当前
+    恒为空列表，故本函数平时是 no-op；这里把「name → keyword 行 →
+    paper_keyword 行」这条写路径先铺好并测过，阶段五产出关键词后直接传进来
+    即可，paper 表无需改动。weight / rank 由阶段五给出，这里照存。
+    """
+    for i, kw in enumerate(keywords or [], start=1):
+        name = (kw.get("name") if isinstance(kw, dict) else kw) or ""
+        name = name.strip()
+        if not name:
+            continue
+        name_key = normalize_title(name)
+        if not name_key:
+            continue
+
+        execute(
+            """INSERT INTO keyword (name, name_key) VALUES (?, ?)
+               ON CONFLICT(name_key) DO UPDATE SET name = excluded.name""",
+            (name, name_key), commit=commit)
+        kid = query_one(
+            "SELECT id FROM keyword WHERE name_key = ?", (name_key,))["id"]
+
+        weight = kw.get("weight") if isinstance(kw, dict) else None
+        rank = kw.get("rank", i) if isinstance(kw, dict) else i
+        execute(
+            """INSERT INTO paper_keyword (paper_id, keyword_id, weight, rank, source)
+               VALUES (?, ?, ?, ?, 'extract')
+               ON CONFLICT(paper_id, keyword_id) DO NOTHING""",
+            (paper_id, kid, weight, rank), commit=commit)
