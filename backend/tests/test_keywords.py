@@ -221,3 +221,136 @@ def test_API_rebuild触发抽取_列表页随之有词(app, client, db):
     # 功能2 的列表接口 JOIN paper_keyword，抽取后关键词直接可见
     papers = client.get("/api/v1/papers").get_json()["data"]["list"]
     assert papers[0]["keywords"]
+
+
+# ---------------------------------------------------------------
+# 泛词单字禁用（短语保留）与指标缩写禁用（方向名保留）
+# ---------------------------------------------------------------
+def test_泛词单字禁用但短语保留(app, db):
+    _seed(db, "Deep Learning for Image Segmentation",
+          "Deep learning and self-supervised learning drive image "
+          "segmentation research. Our diffusion model improves image "
+          "segmentation quality across benchmarks. Self-supervised learning "
+          "pretraining boosts the diffusion model further. The system uses "
+          "text signals and task specific features for segmentation.")
+
+    with app.app_context():
+        keywords.rebuild_keywords()
+    names = _names(db, db.execute("SELECT id FROM paper").fetchone()["id"])
+
+    # 泛词不再以独立关键词出现
+    for banned in ("model", "image", "feature", "task", "text",
+                   "system", "signal"):
+        assert banned not in names, f"泛词 {banned!r} 不该成为关键词"
+    # 含泛词的有效短语照常保留
+    for phrase in ("deep learning", "self-supervised learning",
+                   "image segmentation", "diffusion model"):
+        assert phrase in names, f"有效短语 {phrase!r} 应保留"
+
+
+def test_指标缩写禁用_方向名保留(app, db):
+    _seed(db, "CLIP Guided Neural Rendering",
+          "We evaluate with mse psnr lpips frossl metrics. CLIP features "
+          "guide neural rendering. MSE and PSNR are reported per dataset. "
+          "NeRF baselines are compared with our CLIP guided pipeline.")
+    _seed(db, "3DGS Compression",
+          "3dgs renders scenes with mse psnr metrics. 3dgs compression "
+          "saves storage for streaming.")
+    # nerf 单独一篇反复提及，避免「tf=1 被 Top 8 挤掉」的排序性缺席
+    _seed(db, "NeRF Revisited",
+          "NeRF improves neural rendering. NeRF baselines and NeRF "
+          "variants are compared across scenes.")
+
+    with app.app_context():
+        keywords.rebuild_keywords()
+
+    for banned in ("mse", "psnr", "lpips", "frossl"):
+        row = db.execute("SELECT COUNT(*) AS c FROM keyword WHERE name_key = ?",
+                         (banned,)).fetchone()["c"]
+        assert row == 0, f"指标缩写 {banned!r} 不该成为关键词"
+    nerf_paper = db.execute(
+        "SELECT id FROM paper WHERE title = 'NeRF Revisited'").fetchone()["id"]
+    assert "nerf" in _names(db, nerf_paper)
+    clip_paper = db.execute(
+        "SELECT id FROM paper WHERE title = 'CLIP Guided Neural Rendering'"
+    ).fetchone()["id"]
+    assert "clip" in _names(db, clip_paper)
+    gs_paper = db.execute(
+        "SELECT id FROM paper WHERE title = '3DGS Compression'").fetchone()["id"]
+    assert "3dgs" in _names(db, gs_paper)
+
+
+# ---------------------------------------------------------------
+# 词形折叠
+# ---------------------------------------------------------------
+def test_词形折叠_detect归并到detection(app, db):
+    _seed(db, "We Detect Salient Objects",
+          "Our network detects objects and we detect boundaries in images.")
+    _seed(db, "Salient Object Detection Survey",
+          "Salient object detection methods are surveyed. Detection "
+          "networks are grouped by supervision.")
+
+    with app.app_context():
+        keywords.rebuild_keywords()
+
+    detect_rows = db.execute(
+        "SELECT COUNT(*) AS c FROM keyword WHERE name_key IN ('detect', 'detected')"
+    ).fetchone()["c"]
+    assert detect_rows == 0                       # 变体不单独成词
+    detection = db.execute(
+        "SELECT COUNT(*) AS c FROM keyword WHERE name_key = 'detection'"
+    ).fetchone()["c"]
+    assert detection == 1                         # 归并为一行
+    names = [_names(db, p) for p in
+             [r["id"] for r in db.execute("SELECT id FROM paper")]]
+    assert all("detection" in ns for ns in names)  # 两篇都指向规范词
+
+
+def test_词形折叠_3dg与3dgs归并(app, db):
+    _seed(db, "3DGS Rendering Pipeline", "The 3dgs pipeline renders fast.")
+    _seed(db, "3DG Avatar Animation", "The 3dg avatar animates faces.")
+
+    with app.app_context():
+        keywords.rebuild_keywords()
+
+    rows = db.execute(
+        "SELECT name, name_key FROM keyword WHERE name_key IN ('3dgs', '3dg')"
+    ).fetchall()
+    assert [(r["name"], r["name_key"]) for r in rows] == [("3dgs", "3dgs")]
+    for pid in [r["id"] for r in db.execute("SELECT id FROM paper")]:
+        assert "3dgs" in _names(db, pid)
+
+
+def test_单复数与modeling折叠不留变体行(app, db):
+    _seed(db, "Generative Models", "Generative modeling of images.")
+    _seed(db, "World Modeling", "A world model for agents.")
+
+    with app.app_context():
+        keywords.rebuild_keywords()
+
+    for stale in ("models", "modeling"):
+        assert db.execute("SELECT COUNT(*) AS c FROM keyword WHERE name_key = ?",
+                          (stale,)).fetchone()["c"] == 0
+    # 两个变体写法都归到同一规范词
+    assert db.execute(
+        "SELECT COUNT(*) AS c FROM keyword WHERE name_key = 'generative model'"
+    ).fetchone()["c"] == 1
+
+
+def test_所有格撇号不产生幽灵关键词(app, db):
+    # 回归：model's → _singular 剥 s 会暴露尾部撇号成 model'，绕过泛词禁用，
+    # 再经 link_keywords 的 normalize_title 洗成 "model" 混进关键词表
+    _seed(db, "TEA: Test-time Energy Adaptation",
+          "Our model's reliance on pre-trained model weights hurts the "
+          "model's calibration. LLMs' features guide the model alignment.")
+    _seed(db, "Vision Survey", "Vision transformers advance vision research "
+                               "across many vision benchmarks and tasks.")
+
+    with app.app_context():
+        keywords.rebuild_keywords()
+
+    for stale in ("model", "models", "llms"):
+        assert db.execute("SELECT COUNT(*) AS c FROM keyword WHERE name_key = ?",
+                          (stale,)).fetchone()["c"] == 0, f"{stale!r} 是幽灵关键词"
+    # llms' 折叠成 llm 后是否成行取决于排序（小语料 tf=1 排不进 Top 8），
+    # 这里只断言幽灵行不存在

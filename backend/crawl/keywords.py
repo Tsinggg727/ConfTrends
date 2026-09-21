@@ -70,6 +70,46 @@ SYNONYMS = {
     ("visual", "question", "answering"): "vqa",
 }
 
+# 词形折叠：变体 token → 规范 token（在**同义词短语合并之后**逐词应用 ——
+# 放在合并之前会把 "visual question answering" 变成 "…question answer"，
+# 破坏 →vqa 的短语匹配）。映射来自对库里 keyword 表的真实碰撞分析
+# （segmentation/segment、tracking/track、3dg/3dgs、modeling/model…），
+# 只收「两个形式都真实出现且指同一概念」的对 —— 不做通用词干化，
+# 因为后者会把 display form 变成 detect/segment 这类生硬词干，
+# 还会重塑短语（processing→process 会把 "point cloud processing" 搅坏）。
+WORD_FOLD = {
+    # 动词/动名词 → 领域惯用名词形（关键词的展示形态）
+    "detect": "detection", "detected": "detection",
+    "segment": "segmentation", "segmenting": "segmentation",
+    "edit": "editing", "track": "tracking", "render": "rendering",
+    "match": "matching", "train": "training", "learn": "learning",
+    "cluster": "clustering", "searching": "search", "querying": "query",
+    "masking": "mask", "prompting": "prompt", "labeling": "label",
+    "count": "counting", "grasp": "grasping", "rank": "ranking",
+    "poison": "poisoning", "deforming": "deformation", "adapt": "adaptation",
+    "answering": "answer", "normalizing": "normalization",
+    "summarizing": "summarization", "transform": "transformation",
+    "transforming": "transformation", "viewing": "view", "sounding": "sound",
+    "cleaning": "clean", "cloth": "clothing", "lift": "lifting",
+    "filter": "filtering", "grouping": "group",
+    # 缩写变体归并
+    "modeling": "model",        # generative modeling → generative model …
+    "3dg": "3dgs",              # 同一方向的两种缩写写法
+    "llms": "llm",
+}
+
+# 单字禁用：CV 高频泛词 + 纯指标缩写。与 STOPWORDS 的区别：
+# STOPWORDS 从 token 流里**删除**（"the"/"of" 没有资格参与任何组合），
+# UNIGRAM_BANNED 的词**留在流里** —— "diffusion model" / "image segmentation"
+# 这类有效短语照常构成（§ 需求：禁泛词但保留有效短语），只是不作为
+# 独立关键词参选；两个成员都被禁的二元短语才一并丢弃。
+# 方法缩写的取舍原则：已成为方向名的保留（clip / nerf / 3dgs / gan / vit），
+# 纯指标/单篇方法名禁掉（mse / psnr / lpips / frossl…）。
+UNIGRAM_BANNED = frozenset("""
+model image feature task text system signal
+mse psnr ssim lpips rmse iou fps frossl
+""".split())
+
 _TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9\-']*")
 _SENTENCE_SPLIT = re.compile(r"[.!?:;()\[\]\n]")
 _WORD_MAX_LEN = 40                        # 防御性：超长 token 一律是解析噪声
@@ -100,11 +140,20 @@ def _singular(word):
 
 def _tokenize(text):
     """小写 → 分句 → 分词 → 单复数归一。返回句子列表（TextRank 的窗口
-    不跨句，避免句号两侧的词凑成假共现）。"""
+    不跨句，避免句号两侧的词凑成假共现）。
+
+    所有格撇号要剥掉（model's → model）：不剥的话 token 是 "model'"，
+    既绕过泛词禁用也绕过词形折叠，最后还会经 normalize_title 洗成
+    "model" 混进关键词表（实测产生过 model/llms 两行幽灵关键词）。
+    strip 要做两次：_singular 剥掉所有格的 s 会**新暴露**出尾部撇号
+    （model's → model'），只剥一次挡不住。"""
     sentences = []
     for sent in _SENTENCE_SPLIT.split((text or "").lower()):
         words = [w[:_WORD_MAX_LEN] for w in _TOKEN_RE.findall(sent)]
+        words = [w.strip("'") for w in words]
         words = [_singular(w) for w in words]
+        words = [w.strip("'") for w in words]
+        words = [w for w in words if w]
         if words:
             sentences.append(words)
     return sentences
@@ -130,9 +179,15 @@ def _merge_synonyms(sentences):
     return out
 
 
+def _fold_words(sentences):
+    """逐词应用 WORD_FOLD（必须在短语合并之后，理由见 WORD_FOLD 注释）。"""
+    return [[WORD_FOLD.get(w, w) for w in words] for words in sentences]
+
+
 def _filter_stopwords(sentences):
     """去停用词 / 纯数字 / 单字符，返回过滤后的 token 序列（供 Bigram 与
-    TextRank 共用）。短语替换在过滤之前做，介词不会拆散同义词。"""
+    TextRank 共用）。短语替换在过滤之前做，介词不会拆散同义词；
+    UNIGRAM_BANNED 的词不过滤（要留给短语组合），在候选构造时排除。"""
     kept = []
     for words in sentences:
         tokens = [w for w in words
@@ -144,17 +199,22 @@ def _filter_stopwords(sentences):
 
 def tokenize(text):
     """title + abstract → 过滤后的分句 token 序列。"""
-    return _filter_stopwords(_merge_synonyms(_tokenize(text)))
+    return _filter_stopwords(_fold_words(_merge_synonyms(_tokenize(text))))
 
 
 def _candidates(sentences):
     """候选词 = 单词 + 相邻二元短语（"diffusion model" 这类词组才是 CV 论文
-    真正的关键词形态）。返回 (Counter(候选), Counter(单词))。"""
+    真正的关键词形态）。返回 (Counter(候选), Counter(单词))。
+
+    UNIGRAM_BANNED 的词不作单字候选（泛词/指标缩写），但留在流里参与
+    二元短语 —— 只有两个成员都被禁的短语（"image model"）才丢弃。
+    """
     uni = Counter()
     bi = Counter()
     for tokens in sentences:
-        uni.update(tokens)
-        bi.update(f"{a} {b}" for a, b in zip(tokens, tokens[1:]))
+        uni.update(t for t in tokens if t not in UNIGRAM_BANNED)
+        bi.update(f"{a} {b}" for a, b in zip(tokens, tokens[1:])
+                  if not (a in UNIGRAM_BANNED and b in UNIGRAM_BANNED))
     return uni, bi
 
 
