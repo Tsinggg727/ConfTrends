@@ -51,6 +51,7 @@ onMounted(async () => {
     <template v-if="paper">
       <div class="detail-grid">
         <section class="ct-card main-col">
+          <div class="code-line ct-num">论文编码：{{ paper.id }}</div>
           <h1 class="title">{{ paper.title }}</h1>
           <div class="kw-line">
             <el-tag
@@ -127,6 +128,11 @@ onMounted(async () => {
   font-size: 20px;
   line-height: 1.5;
   margin: 0 0 14px;
+}
+.code-line {
+  font-size: 13px;
+  color: #9aa4b2;
+  margin-bottom: 6px;
 }
 .kw-line {
   display: flex;

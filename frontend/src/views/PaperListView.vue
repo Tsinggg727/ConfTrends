@@ -201,7 +201,7 @@ onMounted(() => {
           class="search-input"
           :placeholder="query.mode === 'exact'
             ? '按题目精确检索（子串匹配）'
-            : '题目 / 关键词'"
+            : '输入论文编码（如 1024）'"
           clearable
           @keyup.enter="search"
         />
@@ -232,6 +232,11 @@ onMounted(() => {
         stripe
         class="table"
       >
+        <el-table-column label="论文编码" width="100">
+          <template #default="{ row }">
+            <span class="ct-num">{{ row.code }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="题目" min-width="320">
           <template #default="{ row }">
             <router-link

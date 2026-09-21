@@ -74,12 +74,13 @@ def test_列表_精确模式只搜题目(app, client, db):
     assert fuzzy["total"] == 1                           # 关键词命中
 
 
-def test_列表_模糊检索不再按编号匹配(app, client, db):
-    """编号已从模糊检索移除（方案A）：id 数字串只当题目子串匹配，查不到正文。"""
+def test_列表_按编号检索(app, client, db):
+    """论文编码 = paper.id：模糊模式下按编码可查到，行里带 code 字段。"""
     pid = _seed_paper(db, "Diffusion Models Beat GANs")
     data = client.get("/api/v1/papers",
                       query_string={"q": str(pid), "mode": "fuzzy"}).get_json()["data"]
-    assert data["total"] == 0
+    assert data["total"] == 1
+    assert data["list"][0]["code"] == pid
 
 
 def test_列表_关键词与会议年份筛选(app, client, db):

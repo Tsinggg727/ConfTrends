@@ -58,7 +58,7 @@ def _build_filters(args):
 
     检索模式（对应列表页 [精确 ▾] 切换）：
       exact —— 仅在题目中匹配（按完整题目的子串）
-      fuzzy —— 题目 + 关键词（默认）
+      fuzzy —— 题目 + 论文编码（paper.id 精确等值） + 关键词（默认）
     """
     where = ["p.status = 'active'"]
     params = []
@@ -73,13 +73,14 @@ def _build_filters(args):
         else:
             where.append("""(
                 p.title LIKE ?
+                OR CAST(p.id AS TEXT) = ?
                 OR EXISTS (
                     SELECT 1 FROM paper_keyword pk
                       JOIN keyword k ON k.id = pk.keyword_id
                      WHERE pk.paper_id = p.id AND k.name LIKE ?
                 )
             )""")
-            params += [f"%{q}%", f"%{q}%"]
+            params += [f"%{q}%", q, f"%{q}%"]
 
     # 首页 Top10 / 详情页关键词标签跳转过来时带的关键词过滤
     keyword = (args.get("keyword") or "").strip()
@@ -127,6 +128,7 @@ def list_papers():
     items = []
     for r in rows:
         item = dict(r)
+        item["code"] = item["id"]          # 论文编码 = paper.id，列表行一并带出
         item["conference"] = {
             "code": r["conference_code"],
             "name": r["conference_name"],
