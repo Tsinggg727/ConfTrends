@@ -1,16 +1,15 @@
 <script setup>
 /**
- * ① 首页 · 热门方向总览
- *
- * 骨架阶段只做一件事：显示 Hello，并验证「前端 → Vite 代理 → Flask → SQLite」
- * 整条链路是通的。完整实现见系统设计 §5-①。
+ * ① 首页 · 热门方向总览（原型①）。
+ * 功能3：Top10 热门方向榜单（热度 = 词频 × 年份增长率）。
+ * 图谱 / 搜索框 / 相关论文抽屉属功能4，后续接入。
  */
 import { onMounted, ref } from 'vue'
 
 import { getHealth } from '@/api/meta'
 import { listPapers } from '@/api/paper'
 import { useGlobalStore } from '@/stores/globalStore'
-import PagePlaceholder from '@/components/PagePlaceholder.vue'
+import TopKeywordsCard from '@/components/home/TopKeywordsCard.vue'
 
 const globalStore = useGlobalStore()
 
@@ -34,9 +33,12 @@ onMounted(async () => {
 
 <template>
   <div class="home">
-    <section class="ct-card hello-card">
-      <h1 class="hello">Hello</h1>
-      <p class="hello-sub">顶会热词统计平台骨架已就绪 —— Vue 3 + Vite + Element Plus + ECharts ／ Flask + SQLite</p>
+    <section class="ct-card hero-card">
+      <h1 class="hero-title">顶会热词统计平台</h1>
+      <p class="hero-sub">
+        CVPR · ICCV · ECCV 三大顶会论文热词一站式统计 ——
+        Top10 热门方向、热度走势与论文管理。
+      </p>
 
       <el-skeleton v-if="loading" :rows="2" animated style="margin-top: 20px" />
 
@@ -57,11 +59,13 @@ onMounted(async () => {
       </div>
     </section>
 
+    <TopKeywordsCard />
+
     <PagePlaceholder
-      title="首页 · 热门方向总览"
-      desc="骨架完成后，本页按设计文档实现 Top10 榜单、关键词图谱（节点大小=热度、Top1 高亮）、搜索框与热门快捷标签、右侧抽屉。"
+      title="关键词图谱（功能4 预告）"
+      desc="节点大小 = 热度、Top1 高亮、全屏与右侧相关论文抽屉 —— 随功能4 接入。"
       ref="系统设计 §5-①"
-      :modules="['Hero 统计条', '搜索框 + 热门快捷标签', 'Top10 榜单（折叠）', '关键词图谱 + 全屏', '右侧相关论文抽屉']"
+      :modules="['搜索框 + 热门快捷标签', '关键词图谱 + 全屏', '右侧相关论文抽屉']"
     />
   </div>
 </template>
@@ -73,14 +77,14 @@ onMounted(async () => {
   gap: 16px;
 }
 
-.hello-card {
+.hero-card {
   text-align: center;
-  padding: 48px 24px;
+  padding: 40px 24px 32px;
 }
 
-.hello {
+.hero-title {
   margin: 0;
-  font-size: 56px;
+  font-size: 34px;
   font-weight: 800;
   letter-spacing: -1px;
   background: linear-gradient(135deg, var(--ct-primary), var(--ct-secondary));
@@ -89,7 +93,7 @@ onMounted(async () => {
   color: transparent;
 }
 
-.hello-sub {
+.hero-sub {
   margin: 12px 0 0;
   color: var(--ct-text-sub);
   font-size: 14px;
