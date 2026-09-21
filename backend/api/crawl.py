@@ -21,6 +21,8 @@
 表现冲突（§4.1 的设计取舍）。批量任务同理：单条失败不进 HTTP 状态码，
 它是任务结果的一部分，通过 `recent_failures` 与结果列表呈现。
 """
+from datetime import datetime, timezone
+
 from flask import Blueprint, current_app, request
 
 from crawl import batch, service, storage
@@ -589,6 +591,22 @@ def retry_task(task_id):
     }, message=f"已创建重试任务，共 {len(candidates)} 条")
 
 
+def _to_local(value):
+    """UTC 时间串 → 本地时区时间串。
+
+    storage 统一存 SQLite CURRENT_TIMESTAMP（= UTC，避免 Python 本地时区
+    混进库），返回给前端前在这里转成本地时间，历史面板显示的才和本机
+    时钟一致。不是预期格式的原样返回，不猜。
+    """
+    if not value:
+        return value
+    try:
+        dt = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return value
+    return dt.replace(tzinfo=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _task_summary(row):
     """列表行与进度查询共用一套字段口径，前端两种入口读到的形状一致。"""
     total = row["total"] or 0
@@ -612,6 +630,6 @@ def _task_summary(row):
         "cursor": row["cursor"],
         "pause_reason": pause_reason,
         "pause_label": batch.pause_label(pause_reason),
-        "created_at": row["created_at"],
-        "finished_at": row["finished_at"],
+        "created_at": _to_local(row["created_at"]),
+        "finished_at": _to_local(row["finished_at"]),
     }

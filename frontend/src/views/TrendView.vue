@@ -17,6 +17,7 @@ const PALETTE = ['#C9A85C', '#4C6FB6', '#7B6FC0', '#8F7333', '#3A5590',
 const FRAME_MS = 3000                        // 帧间隔 = 动画时长：每 3s 沿轴推进一年（视觉反馈）
 
 const conferences = ref(['CVPR', 'ICCV', 'ECCV'])
+const topN = ref(10)                         // 曲线数：Top N 热词（传后端 top_n）
 const years = ref([])                        // 窗口内的全部年份（升序）
 const series = ref([])                       // 每词一条：data 按 (year, conference)
 const loading = ref(true)
@@ -167,7 +168,7 @@ async function load() {
   try {
     const data = await getTrend({
       conferences: conferences.value.join(','),
-      top_n: 10,
+      top_n: topN.value,
     })
     years.value = data.years
     series.value = data.series
@@ -193,7 +194,7 @@ onUnmounted(() => {
   chart?.dispose()
   chart = null
 })
-watch(conferences, load)
+watch([conferences, topN], load)
 watch(loading, (v) => {
   if (!v) render(true)          // 新语料加载完成：整体替换（清掉旧关键词系列）
 })
@@ -218,8 +219,7 @@ watch(frameSeries, () => render())   // 播放/追加帧：合并式增量更新
                        :value="o.value">{{ o.label }}</el-checkbox>
         </el-checkbox-group>
         <span class="label">曲线</span>
-        <el-select size="small" style="width: 90px"
-                   :model-value="10" @update:model-value="load">
+        <el-select v-model="topN" size="small" style="width: 90px">
           <el-option label="Top 5" :value="5" />
           <el-option label="Top 10" :value="10" />
           <el-option label="Top 15" :value="15" />

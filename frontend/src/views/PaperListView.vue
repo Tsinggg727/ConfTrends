@@ -201,7 +201,7 @@ onMounted(() => {
           class="search-input"
           :placeholder="query.mode === 'exact'
             ? '按题目精确检索（子串匹配）'
-            : '题目 / 编号 / 关键词'"
+            : '题目 / 关键词'"
           clearable
           @keyup.enter="search"
         />
