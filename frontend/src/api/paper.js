@@ -39,3 +39,8 @@ export function deletePaper(id) {
 export function restorePaper(id) {
   return request.post(`/papers/${id}/restore`)
 }
+
+/** 按会议 / 年份批量软删除（至少一个条件；返回 { deleted }） */
+export function batchDeletePapers(data) {
+  return request.post('/papers/batch-delete', data)
+}

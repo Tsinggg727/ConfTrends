@@ -8,18 +8,20 @@
  * 走功能1 的 POST /papers/crawl（auto_commit=true，直接写库）——
  * 不在 GET /papers 上做隐式爬取副作用。
  */
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { crawlSingle } from '@/api/crawl'
-import { deletePaper, listPapers } from '@/api/paper'
+import { batchDeletePapers, deletePaper, listPapers } from '@/api/paper'
 import { useGlobalStore } from '@/stores/globalStore'
+import { useUnitsStore } from '@/stores/unitsStore'
 import PaperFormDialog from '@/components/papers/PaperFormDialog.vue'
 
 const route = useRoute()
 const router = useRouter()
 const globalStore = useGlobalStore()
+const unitsStore = useUnitsStore()
 
 const query = reactive({
   q: String(route.query.q || ''),
@@ -110,6 +112,53 @@ async function removeRow(row) {
   load()
 }
 
+// ---------- 批量删除（按会议 / 年份） ----------
+const batchVisible = ref(false)
+const batchConf = ref('')
+const batchYear = ref(null)
+const batchCount = ref(0)
+const batchLoading = ref(false)
+const batchDeleting = ref(false)
+
+async function previewBatch() {
+  batchLoading.value = true
+  try {
+    const data = await listPapers({
+      conference: batchConf.value || undefined,
+      year: batchYear.value || undefined,
+      page: 1,
+      page_size: 1,
+    })
+    batchCount.value = data.total
+  } finally {
+    batchLoading.value = false
+  }
+}
+
+watch([batchConf, batchYear], () => {
+  if (!batchVisible.value) return
+  previewBatch()
+})
+
+async function confirmBatch() {
+  if (!batchConf.value && !batchYear.value) {
+    ElMessage.warning('请至少选择会议或年份之一')
+    return
+  }
+  batchDeleting.value = true
+  try {
+    const res = await batchDeletePapers({
+      conference_code: batchConf.value || undefined,
+      year: batchYear.value || undefined,
+    })
+    ElMessage.success(`已批量软删除 ${res.deleted} 篇（可逐篇恢复）`)
+    batchVisible.value = false
+    load()
+  } finally {
+    batchDeleting.value = false
+  }
+}
+
 /** 兜底：按检索词当题目去爬，auto_commit=true 直接入库，回来刷新列表 */
 const crawling = ref(false)
 async function crawlFallback() {
@@ -127,7 +176,10 @@ async function crawlFallback() {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  if (!unitsStore.units.length) unitsStore.load()
+})
 </script>
 
 <template>
@@ -166,6 +218,9 @@ onMounted(load)
         </el-button>
 
         <div class="spacer" />
+        <el-button type="danger" plain @click="batchVisible = true">
+          批量删除
+        </el-button>
         <el-button @click="openCreate">＋ 新增</el-button>
       </div>
 
@@ -256,6 +311,42 @@ onMounted(load)
         </el-empty>
       </div>
     </section>
+
+    <!-- 批量删除：按会议 / 年份软删除，需二次确认 -->
+    <el-dialog
+      v-model="batchVisible"
+      title="按会议 / 年份批量删除"
+      width="440px"
+      @open="previewBatch"
+    >
+      <el-form label-width="64px" label-position="left">
+        <el-form-item label="会议">
+          <el-select v-model="batchConf" clearable placeholder="全部会议"
+                     style="width: 100%">
+            <el-option v-for="code in unitsStore.conferenceCodes"
+                       :key="code" :label="code" :value="code" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="年份">
+          <el-select v-model="batchYear" clearable placeholder="全部年份"
+                     style="width: 100%">
+            <el-option v-for="y in YEAR_OPTIONS" :key="y" :label="y" :value="y" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <p class="batch-hint">
+        将软删除符合条件的
+        <b class="ct-num">{{ batchCount }}</b> 篇论文（<b>{{ batchConf || '全部会议' }}
+        {{ batchYear || '全部年份' }}</b>）。软删除可逐篇恢复，但热词统计将立即排除它们。
+      </p>
+      <template #footer>
+        <el-button @click="batchVisible = false">取消</el-button>
+        <el-button type="danger" :loading="batchDeleting"
+                   :disabled="batchCount === 0" @click="confirmBatchDelete">
+          确认删除 {{ batchCount }} 篇
+        </el-button>
+      </template>
+    </el-dialog>
 
     <PaperFormDialog
       v-model="dialogOpen"
@@ -349,5 +440,13 @@ onMounted(load)
   margin-top: 14px;
   font-size: 12px;
   color: #9aa4b2;
+}
+.batch-hint {
+  font-size: 0.8125rem;
+  color: var(--ct-text-sub);
+  line-height: 1.7;
+}
+.batch-hint b {
+  color: var(--ct-danger);
 }
 </style>

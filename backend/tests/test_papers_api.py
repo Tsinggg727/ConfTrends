@@ -218,3 +218,55 @@ def test_删除与恢复(app, client, db):
 def test_删除与恢复_不存在404(client):
     assert client.delete("/api/v1/papers/999999").status_code == 404
     assert client.post("/api/v1/papers/999999/restore").status_code == 404
+
+
+# ---------------------------------------------------------------
+# 批量删除（按会议 / 年份）
+# ---------------------------------------------------------------
+def _seed_conf_year(client, title, code, year):
+    resp = client.post("/api/v1/papers", json={
+        "title": title, "conference_code": code, "year": year})
+    assert resp.status_code == 200
+    return resp.get_json()["data"]["id"]
+
+
+def test_批量删除_按会议年份(app, client, db):
+    for i in range(3):
+        _seed_conf_year(client, f"CVPR Paper {i}", "CVPR", 2024)
+    for i in range(2):
+        _seed_conf_year(client, f"ICCV Paper {i}", "ICCV", 2023)
+
+    resp = client.post("/api/v1/papers/batch-delete",
+                       json={"conference_code": "CVPR", "year": 2024})
+    assert resp.status_code == 200
+    assert resp.get_json()["data"]["deleted"] == 3
+
+    # CVPR 2024 全部软删除；ICCV 2023 不受影响
+    left = client.get("/api/v1/papers",
+                      query_string={"conference": "CVPR", "year": 2024}) \
+        .get_json()["data"]["total"]
+    assert left == 0
+    assert client.get("/api/v1/papers",
+                      query_string={"conference": "ICCV",
+                                    "year": 2023}).get_json()["data"]["total"] == 2
+
+    # 删除的论文可逐篇恢复
+    pid = db.execute("SELECT id FROM paper WHERE status='deleted' LIMIT 1") \
+        .fetchone()["id"]
+    assert client.post(f"/api/v1/papers/{pid}/restore").status_code == 200
+
+
+def test_批量删除_条件不全返回400(app, client):
+    resp = client.post("/api/v1/papers/batch-delete", json={})
+    assert resp.status_code == 400
+    assert "至少指定" in resp.get_json()["message"]
+
+    resp = client.post("/api/v1/papers/batch-delete",
+                       json={"conference_code": "NIPS"})
+    assert resp.status_code == 400
+
+
+def test_批量删除_无匹配返回404(app, client):
+    resp = client.post("/api/v1/papers/batch-delete",
+                       json={"conference_code": "CVPR", "year": 2026})
+    assert resp.status_code == 404

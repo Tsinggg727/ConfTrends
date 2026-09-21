@@ -18,7 +18,8 @@
 from flask import Blueprint, request
 
 from crawl.textutil import normalize_title
-from db import execute, query_all, query_one
+from crawl.units import CONFERENCE_CODES
+from db import execute, execute_many, query_all, query_one
 from utils.pagination import paginated, parse_pagination
 from utils.response import fail, ok
 
@@ -307,3 +308,58 @@ def restore_paper(paper_id):
     execute("UPDATE paper SET status = 'active', updated_at = CURRENT_TIMESTAMP"
             " WHERE id = ?", (paper_id,))
     return ok({"id": paper_id, "status": "active"}, message="已恢复"), 200
+
+
+@bp.post("/papers/batch-delete")
+def batch_delete_papers():
+    """按会议 / 年份批量软删除（status='deleted'，可逐篇恢复）。
+
+    至少指定 conference_code 或 year 之一，防止全表误删；
+    只作用于 status='active' 的论文，返回删除数量。
+    """
+    payload = request.get_json(silent=True) or {}
+    code = (payload.get("conference_code") or "").strip().upper()
+    raw_year = payload.get("year")
+
+    year = None
+    if raw_year not in (None, ""):
+        try:
+            year = int(raw_year)
+        except (TypeError, ValueError):
+            return fail(400, "year 必须是整数"), 400
+    if not code and year is None:
+        return fail(400, "至少指定 conference_code 或 year 之一"), 400
+    if code and code not in CONFERENCE_CODES:
+        return fail(400, f"conference_code 必须是 {' / '.join(CONFERENCE_CODES)} 之一"), 400
+
+    where = ["p.status = 'active'"]
+    params = []
+    if code:
+        where.append("c.code = ?")
+        params.append(code)
+    if year is not None:
+        where.append("p.year = ?")
+        params.append(year)
+    clause = " AND ".join(where)
+
+    n = query_one(
+        f"""SELECT COUNT(*) AS c FROM paper p
+              LEFT JOIN conference c ON c.id = p.conference_id
+             WHERE {clause}""",
+        params,
+    )["c"]
+    if n == 0:
+        return fail(404, "没有符合条件的论文"), 404
+
+    ids = [r["id"] for r in query_all(
+        f"""SELECT p.id FROM paper p
+              LEFT JOIN conference c ON c.id = p.conference_id
+             WHERE {clause}""",
+        params,
+    )]
+    execute_many(
+        "UPDATE paper SET status = 'deleted', updated_at = CURRENT_TIMESTAMP"
+        " WHERE id = ?",
+        [(i,) for i in ids],
+    )
+    return ok({"deleted": n}, message=f"已批量软删除 {n} 篇论文（可逐篇恢复）")
