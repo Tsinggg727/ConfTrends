@@ -10,3 +10,15 @@ import request from './request'
 export function getTopStats(params) {
   return request.get('/stats/top', { params })
 }
+
+/**
+ * 热词逐年热度（功能5 走势页 / 原型②）
+ * @param {object} params
+ * @param {string} [params.keywords]   逗号分隔 keyword id，缺省 = 范围内热度 Top N
+ * @param {number} [params.from] [params.to]  年份窗口
+ * @param {string} [params.conferences] 逗号分隔会议 code，缺省 = 三大会议
+ * @param {number} [params.top_n]      缺省选词数（10，上限 30）
+ */
+export function getTrend(params) {
+  return request.get('/stats/trend', { params })
+}

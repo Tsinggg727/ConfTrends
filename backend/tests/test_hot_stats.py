@@ -199,3 +199,61 @@ def test_API_rebuild触发重算(app, ranked):
                        query_string={"year": 2024}).get_json()["data"]
     assert [r["name"] for r in after["list"]] == \
         [r["name"] for r in before["list"]]            # 幂等：重算结果一致
+
+
+# ---------------------------------------------------------------
+# GET /stats/trend（功能5 走势数据源）
+# ---------------------------------------------------------------
+def test_API_trend_选词_窗口_会议过滤(app, db, ranked):
+    # ranked 语料：hotkw 跨 2023/2024，rare 只在 2024，eccvonly 只在 2024 ECCV
+    hotkw_id = db.execute("SELECT id FROM keyword WHERE name='hotkw'") \
+        .fetchone()["id"]
+    rare_id = db.execute("SELECT id FROM keyword WHERE name='rare'") \
+        .fetchone()["id"]
+
+    data = ranked.get("/api/v1/stats/trend").get_json()["data"]
+    assert data["years"] == [2023, 2024]
+    names = [s["name"] for s in data["series"]]
+    assert "hotkw" in names and "rare" in names       # 缺省按总热度选 top_n
+    hotkw = next(s for s in data["series"] if s["name"] == "hotkw")
+    # data 保留 conference 维度：2023 与 2024 各一行（都是 CVPR）
+    assert [(d["year"], d["conference"]) for d in hotkw["data"]] == \
+        [(2023, "CVPR"), (2024, "CVPR")]
+
+    # 显式指定 keywords：只返回指定的词
+    only = ranked.get("/api/v1/stats/trend",
+                      query_string={"keywords": str(hotkw_id)}).get_json()["data"]
+    assert [s["keyword_id"] for s in only["series"]] == [hotkw_id]
+
+    # from/to 窗口：2023 只有一年
+    win = ranked.get("/api/v1/stats/trend",
+                     query_string={"from": 2023, "to": 2023}).get_json()["data"]
+    assert win["years"] == [2023]
+    for series in win["series"]:
+        assert all(d["year"] == 2023 for d in series["data"])
+
+    # conferences 过滤：只看 ECCV → hotkw/rare（CVPR 词）消失，eccvonly 留下
+    eccv = ranked.get("/api/v1/stats/trend",
+                      query_string={"conferences": "ECCV"}).get_json()["data"]
+    eccv_names = [s["name"] for s in eccv["series"]]
+    assert "eccvonly" in eccv_names and "hotkw" not in eccv_names
+
+    # keywords 多值：逗号分隔的两个 id 都返回
+    multi = ranked.get("/api/v1/stats/trend",
+                       query_string={"keywords": f"{hotkw_id},{rare_id}"}
+                       ).get_json()["data"]
+    assert {s["keyword_id"] for s in multi["series"]} == {hotkw_id, rare_id}
+
+
+def test_API_trend_参数校验(app, ranked):
+    assert ranked.get("/api/v1/stats/trend",
+                      query_string={"keywords": "abc"}).status_code == 400
+    assert ranked.get("/api/v1/stats/trend",
+                      query_string={"conferences": "NIPS"}).status_code == 400
+    assert ranked.get("/api/v1/stats/trend",
+                      query_string={"from": 2025, "to": 2023}).status_code == 400
+
+
+def test_API_trend_空统计表返回空结构(app, client):
+    data = client.get("/api/v1/stats/trend").get_json()["data"]
+    assert data["years"] == [] and data["series"] == []
