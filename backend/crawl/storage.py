@@ -292,7 +292,11 @@ def page_items(task_row_id, status="all", after_seq=0, page=1, page_size=20):
     """
     where = ["i.task_id = ?", "i.seq > ?"]
     params = [task_row_id, after_seq]
-    if status != "all":
+    if status == "all":
+        # 「全部」= 已有结果的条目；pending（还没轮到爬）不是结果，
+        # 混进来会被前端渲染成假失败行（§4.2 全部/成功/失败筛选）
+        where.append("i.status != 'pending'")
+    else:
         where.append("i.status = ?")
         params.append(status)
     clause = " AND ".join(where)

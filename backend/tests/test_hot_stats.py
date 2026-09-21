@@ -257,3 +257,22 @@ def test_API_trend_参数校验(app, ranked):
 def test_API_trend_空统计表返回空结构(app, client):
     data = client.get("/api/v1/stats/trend").get_json()["data"]
     assert data["years"] == [] and data["series"] == []
+
+
+# ---- 结果列表「全部」不含 pending 条目（视觉反馈：假失败行） ----
+def test_API_items_all排除pending(app, client):
+    from crawl import storage as _s
+    with app.app_context():
+        task = _s.create_task("batch_titles", "CVPR", 2024, True, total=3)
+        _s.create_items(task["id"], ["A", "B", "C"])
+        _s.finish_item(_s.list_items(task["id"])[0]["id"],
+                       "success", parsed={"input_title": "A"})
+        # B、C 仍是 pending
+        _s.finish_item(_s.list_items(task["id"])[0]["id"],
+                       "success", parsed={"input_title": "A"})
+        # B、C 仍是 pending
+
+    rows = client.get(f"/api/v1/tasks/{task['task_id']}/items",
+                      query_string={"status": "all"}).get_json()["data"]
+    assert rows["total"] == 1                           # pending 不算结果
+    assert rows["list"][0]["status"] == "success"
