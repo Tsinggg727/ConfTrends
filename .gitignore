@@ -31,3 +31,6 @@ venv/
 .env
 *.local
 *.log
+*.out
+*.db-shm
+*.db-wal
