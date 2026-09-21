@@ -6,6 +6,14 @@
  */
 import request from './request'
 
+/**
+ * 可抓取单元日历（§1.0）：9 个会议-年份组合 + 实测/估值篇数。
+ * 静默请求：失败由下拉的失败态/重试表达，不弹全局 toast。
+ */
+export function listUnits() {
+  return request.get('/crawl/units', { silent: true })
+}
+
 /** 单个题目爬取（同步）。body: { title, conference_code?, year?, auto_commit? } */
 export function crawlSingle(data) {
   return request.post('/papers/crawl', data, { timeout: 120000 })

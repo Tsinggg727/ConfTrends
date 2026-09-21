@@ -36,6 +36,16 @@ VENUE_LABELS = {
 # 「不限定会议」时按这个顺序依次找：整体从新到旧，同一年内 CVPR > ICCV > ECCV
 _CONF_ORDER = {"CVPR": 0, "ICCV": 1, "ECCV": 2}
 
+# 实测篇数（§1.0 / §1.1，2026-09-20 实测）。没实测的单元由接口层给估值区间，
+# 不在这里编数字 —— 篇数是给用户看「这届要爬多久」的，宁可 null 也不糊弄。
+MEASURED_COUNTS = {
+    ("CVPR", 2024): 2716,
+    ("ICCV", 2023): 2156,
+    ("ECCV", 2024): 2387,
+}
+# 未实测单元的篇数估值区间（按已实测三届的规模外推，非承诺）
+ESTIMATED_RANGE = (2000, 2800)
+
 
 @dataclass(frozen=True)
 class Unit:

@@ -1,15 +1,8 @@
 /**
- * 可抓取单元日历 —— 与后端 crawl/units.py 的 CONFERENCE_UNITS 保持一致。
- *
- * ECCV 2026 尚未在 ECVA 发布（截至 2026-09），后端放榜后加一行，这里同步。
+ * 任务状态与类型的展示映射。
+ * （会议-年份日历已改为从 GET /api/v1/crawl/units 动态拉取，
+ * 见 stores/unitsStore.js —— 不再在这里手工镜像后端数据。）
  */
-export const CONFERENCE_UNITS = {
-  CVPR: [2022, 2023, 2024, 2025, 2026],
-  ICCV: [2023, 2025],
-  ECCV: [2022, 2024],
-}
-
-export const CONFERENCE_CODES = Object.keys(CONFERENCE_UNITS)
 
 /** 任务状态 → 展示文案与 Element Plus tag 类型 */
 export const STATUS_META = {

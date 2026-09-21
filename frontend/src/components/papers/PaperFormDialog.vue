@@ -8,7 +8,9 @@ import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 
 import { createPaper, updatePaper } from '@/api/paper'
-import { CONFERENCE_CODES } from '@/constants/crawl'
+import { useUnitsStore } from '@/stores/unitsStore'
+
+const unitsStore = useUnitsStore()
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -32,6 +34,8 @@ const form = reactive({
 
 watch(() => props.modelValue, (open) => {
   if (!open) return
+  // 弹窗打开时确保日历在手（新增/编辑都要选会议）
+  if (!unitsStore.units.length) unitsStore.load()
   Object.assign(form, {
     title: props.paper?.title || '',
     conference_code: props.paper?.conference?.code || '',
@@ -80,8 +84,8 @@ async function save() {
       <el-form-item label="会议">
         <el-select v-model="form.conference_code" placeholder="不指定" clearable
                    style="width: 160px">
-          <el-option v-for="code in CONFERENCE_CODES" :key="code"
-                     :label="code" :value="code" />
+        <el-option v-for="code in unitsStore.conferenceCodes" :key="code"
+                   :label="code" :value="code" />
         </el-select>
       </el-form-item>
       <el-form-item label="年份">

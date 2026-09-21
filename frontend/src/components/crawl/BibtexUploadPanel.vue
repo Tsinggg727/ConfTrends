@@ -4,16 +4,18 @@
  * 两种模式：
  *   bibtex —— 上传 .bib（会议 + 年份必填），默认边爬边入库；
  *   unit   —— 不传文件，平台自己去列表页拉整届清单。
- * 整届动辄 2000–3000 篇、约 40–60 分钟，启动前必须把时间成本摆明（§5.3）。
+ * 会议/年份下拉读 unitsStore；耗时预告按接口的实测/估值篇数换算
+ * （约 1 秒/篇，与后端限速一致）—— 长任务启动前必须把时间成本摆明（§5.3）。
  */
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 
 import { importPapers } from '@/api/crawl'
-import { CONFERENCE_CODES, CONFERENCE_UNITS } from '@/constants/crawl'
 import { useCrawlStore } from '@/stores/crawlStore'
+import { nearestYear, useUnitsStore } from '@/stores/unitsStore'
 
 const store = useCrawlStore()
+const unitsStore = useUnitsStore()
 
 const mode = ref('bibtex')                // bibtex / unit
 const conference = ref('CVPR')
@@ -23,7 +25,42 @@ const fileList = ref([])
 const entryCount = ref(0)                 // 从 .bib 文本数出来的记录条数
 const submitting = computed(() => store.submitting)
 
-const yearOptions = computed(() => CONFERENCE_UNITS[conference.value] || [])
+const yearOptions = computed(() => unitsStore.yearsOf(conference.value))
+
+onMounted(() => {
+  if (!unitsStore.units.length) unitsStore.load()
+})
+
+/** 默认 CVPR 2024；日历加载后若默认组合不在日历里，吸附到最近的可抓届 */
+watch(() => unitsStore.units, (units) => {
+  if (!units.length) return
+  if (!unitsStore.unitOf(conference.value, year.value)) {
+    year.value = nearestYear(unitsStore.yearsOf(conference.value),
+                             Number(year.value) || 0)
+  }
+}, { immediate: true })
+
+/** 当前组合的篇数与耗时预告（约 1 秒/篇） */
+const unitInfo = computed(() => {
+  const unit = unitsStore.unitOf(conference.value, year.value)
+  if (!unit) return null
+  if (unit.papers_measured) {
+    return { text: `实测 ${unit.expected_papers} 篇`, minutes: Math.round(unit.expected_papers / 60) }
+  }
+  return {
+    text: `估 ${unit.est_papers_min}–${unit.est_papers_max} 篇`,
+    minutes: Math.round(unit.est_papers_min / 60),
+    minutesMax: Math.round(unit.est_papers_max / 60),
+  }
+})
+
+const durationText = computed(() => {
+  const info = unitInfo.value
+  if (!info) return ''
+  return info.minutesMax
+    ? `预计约 ${info.minutes}–${info.minutesMax} 分钟`
+    : `预计约 ${info.minutes} 分钟`
+})
 
 async function onFileChange(file, files) {
   fileList.value = files.slice(-1)
@@ -110,11 +147,16 @@ async function submit() {
     </el-upload>
 
     <div class="target-row">
-      <el-select v-model="conference" style="width: 130px">
-        <el-option v-for="code in CONFERENCE_CODES" :key="code"
+      <el-select
+        v-model="conference"
+        style="width: 130px"
+        :loading="unitsStore.loading"
+        :disabled="unitsStore.loading && !unitsStore.units.length"
+      >
+        <el-option v-for="code in unitsStore.conferenceCodes" :key="code"
                    :label="code" :value="code" />
       </el-select>
-      <el-select v-model="year" style="width: 130px" @change="() => {}">
+      <el-select v-model="year" style="width: 130px">
         <el-option v-for="y in yearOptions" :key="y" :label="y" :value="y" />
       </el-select>
       <el-checkbox v-model="autoCommit">写入数据库（整届建议勾选）</el-checkbox>
@@ -128,14 +170,22 @@ async function submit() {
       class="count-alert"
     />
     <el-alert
-      title="整届约 2000–3000 篇，按限速抓取预计 40–60 分钟；可随时暂停、离开页面，进度自动保留。"
+      :title="`整届${unitInfo ? unitInfo.text : ''}，${durationText || '按限速抓取'}` +
+              '；可随时暂停、离开页面，进度自动保留。'"
       type="warning"
       :closable="false"
       class="count-alert"
     />
 
+    <div v-if="unitsStore.error" class="units-error">
+      会议日历加载失败，无法选择会议与年份
+      <el-button size="small" text type="primary" @click="unitsStore.load()">重试</el-button>
+    </div>
+
     <div class="actions">
-      <el-button type="primary" :loading="submitting" @click="submit">
+      <el-button type="primary" :loading="submitting"
+                 :disabled="unitsStore.loading && !unitsStore.units.length"
+                 @click="submit">
         开始爬取
       </el-button>
     </div>
@@ -171,5 +221,10 @@ async function submit() {
 }
 .count-alert {
   margin-bottom: 10px;
+}
+.units-error {
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--ct-danger);
 }
 </style>

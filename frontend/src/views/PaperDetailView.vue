@@ -9,18 +9,22 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { getPaper } from '@/api/paper'
-import { CONFERENCE_UNITS } from '@/constants/crawl'
+import { useUnitsStore } from '@/stores/unitsStore'
 
 const route = useRoute()
 const router = useRouter()
+const unitsStore = useUnitsStore()
 
 const paper = ref(null)
 const loading = ref(true)
 
+/** 会议全称只在「该会议确实办过这一年」时展示（日历来自 /crawl/units） */
 const venue = computed(() => {
   const code = paper.value?.conference?.code
-  const years = code ? CONFERENCE_UNITS[code] : null
-  return years?.includes(paper.value?.year) ? paper.value.conference.name : ''
+  if (!code) return ''
+  return unitsStore.yearsOf(code).includes(paper.value.year)
+    ? paper.value.conference.name
+    : ''
 })
 
 function hostOf(url) {
@@ -32,6 +36,8 @@ function hostOf(url) {
 }
 
 onMounted(async () => {
+  // 日历用于会议全称校验，失败不影响详情展示（venue 退化为空）
+  if (!unitsStore.units.length) unitsStore.load()
   try {
     paper.value = await getPaper(route.params.id)
   } finally {

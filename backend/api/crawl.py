@@ -25,7 +25,8 @@ from flask import Blueprint, current_app, request
 
 from crawl import batch, service, storage
 from crawl.fail_reason import CrawlError, InvalidParam, describe, is_retryable
-from crawl.units import CONFERENCE_CODES, held_in, units_for
+from crawl.units import (CONFERENCE_CODES, ESTIMATED_RANGE, MEASURED_COUNTS,
+                         held_in, list_units, units_for)
 from db import query_one
 from utils.pagination import paginated, parse_pagination
 from utils.response import fail, ok
@@ -43,6 +44,33 @@ STAGE_LABELS = {
 
 # §4.1 ③：recent_failures 只带最近若干条，完整失败列表另走分页接口
 RECENT_FAILURES = 10
+
+
+# ---------------------------------------------------------------
+# 可抓取单元日历（只读）
+# ---------------------------------------------------------------
+@bp.get("/crawl/units")
+def list_crawl_units():
+    """可抓取单元日历（§1.0）—— 前端会议/年份下拉的数据源。
+
+    只读、无副作用：日历来自 CONFERENCE_UNITS（实测确认的 9 个组合），
+    篇数有实测给实测、没实测给估值区间，前端据此换算「预计耗时」。
+    """
+    units = []
+    for u in list_units():
+        measured = MEASURED_COUNTS.get((u.conference_code, u.year))
+        units.append({
+            "conference_code": u.conference_code,
+            "year": u.year,
+            "source": u.source,
+            "label": u.label,
+            "available": True,            # 日历里只有实测确认可抓的组合
+            "expected_papers": measured,  # 没实测为 null，别拿估值冒充实测
+            "papers_measured": measured is not None,
+            "est_papers_min": ESTIMATED_RANGE[0],
+            "est_papers_max": ESTIMATED_RANGE[1],
+        })
+    return ok({"units": units, "total": len(units)})
 
 
 # ---------------------------------------------------------------
