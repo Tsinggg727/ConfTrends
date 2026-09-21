@@ -11,8 +11,9 @@ import * as echarts from 'echarts'
 
 import { getTrend } from '@/api/stats'
 
-const PALETTE = ['#F59E0B', '#3B82F6', '#10B981', '#8B5CF6', '#EF4444',
-  '#06B6D4', '#EC4899', '#84CC16', '#F97316', '#6366F1']
+/* 低饱和三色族调色板（视觉评审定稿：哑光金 / 墨蓝 / 雾紫及中性扩展） */
+const PALETTE = ['#C9A85C', '#4C6FB6', '#7B6FC0', '#8F7333', '#3A5590',
+  '#9B8CCB', '#B08250', '#64707F', '#AEB6C2', '#7B8A9E']
 const FRAME_MS = 1000                        // 原型：1 帧 / 秒
 
 const conferences = ref(['CVPR', 'ICCV', 'ECCV'])
@@ -239,7 +240,9 @@ watch(trendSeries, render)
             :disabled="!years.length"
             @click="togglePlay"
           >
-            {{ playing ? '⏸ 暂停' : '▶ 播放动图' }}
+            <svg v-if="!playing" class="ic" style="width:.875rem;height:.875rem" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l10-6.5z"/></svg>
+            <svg v-else class="ic" style="width:.875rem;height:.875rem" viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="5" width="3.5" height="14" rx="1"/><rect x="13.5" y="5" width="3.5" height="14" rx="1"/></svg>
+            {{ playing ? '暂停' : '播放动图' }}
           </el-button>
           <el-button size="small" :disabled="!years.length" @click="stepFrame(1)">
             下一帧

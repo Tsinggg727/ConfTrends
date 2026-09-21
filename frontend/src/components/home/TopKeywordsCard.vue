@@ -1,27 +1,23 @@
 <script setup>
 /**
- * Top10 热门方向榜单 —— 功能3 / 原型①。
- * ECharts 横向条形图：条长由 heat_norm 驱动（系统设计 §2.5），
- * Top1 #F59E0B / Top2 银 / Top3 铜；年份与会议口径可切换；
- * 点条目 → 论文列表按该词过滤（与关键词标签行为一致）。
+ * Top10 热门方向（功能3 / 原型①）—— 与预览稿一致的 HTML 行式榜单。
+ * 排名条统一冷调主色系（视觉评审定稿：不再按名次分金银铜色），前三词名
+ * 加粗，徽章金银铜低饱和；条形动画 transform: scaleX（合规约束④）。
+ * 可折叠（§5.1「Top10 榜单（折叠）」）。
  */
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import * as echarts from 'echarts'
+import { computed, onMounted, ref, watch } from 'vue'
 
 import { getTopStats } from '@/api/stats'
 
-const MEDALS = { 1: '#F59E0B', 2: '#C0C4CC', 3: '#CD7F32' }
-const BASE_COLOR = '#3B82F6'
+const MEDALS = ['gold', 'silver', 'bronze']
 
 const year = ref(null)
-const conference = ref('')               // '' = 三大会议汇总
+const conference = ref('')
 const years = ref([])
-const list = ref([])
 const loading = ref(true)
 const empty = ref(false)
-
-const chartEl = ref(null)
-let chart = null
+const collapsed = ref(false)
+const rows = ref([])
 
 const confOptions = [
   { value: '', label: '三大会议汇总' },
@@ -39,98 +35,34 @@ async function load() {
       n: 10,
     })
     years.value = data.years
-    list.value = data.list
-    // 年份缺省 = 后端给的最新一年；响应里带回来便于联动
     year.value = data.year ?? data.years?.[0] ?? null
+    rows.value = data.list
     empty.value = !data.list.length
-    await nextTick()
-    render()
   } finally {
     loading.value = false
   }
 }
 
-function render() {
-  if (!chartEl.value || empty.value) return
-  if (!chart) chart = echarts.init(chartEl.value)
-
-  // rank 升序的数据在 yAxis 上要倒着放，Top1 才显示在最上面
-  const rows = [...list.value].reverse()
-  chart.setOption({
-    grid: { left: 8, right: 56, top: 8, bottom: 24, containLabel: true },
-    tooltip: {
-      trigger: 'item',
-      backgroundColor: 'rgba(15, 23, 42, .94)',
-      borderWidth: 0,
-      textStyle: { color: '#fff', fontSize: 12 },
-      formatter: (p) => {
-        const r = list.value[list.value.length - 1 - p.dataIndex]
-        const growth = r.growth_rate > 0 ? `↑ ${(r.growth_rate * 100).toFixed(0)}%`
-          : '首年/新词'
-        return `<b>${r.name}</b>（第 ${r.rank} 名）<br/>` +
-          `词频 ${r.freq} ｜ 上年 ${r.prev_freq} ｜ ${growth}<br/>` +
-          `热度 ${Number(r.heat).toFixed(1)}`
-      },
-    },
-    xAxis: { type: 'value', max: 100, splitLine: { show: false }, axisLabel: { show: false } },
-    yAxis: {
-      type: 'category',
-      data: rows.map((r) => r.name),
-      axisTick: { show: false },
-      axisLine: { show: false },
-      axisLabel: { color: '#1F2937', fontSize: 13 },
-    },
-    series: [{
-      type: 'bar',
-      barWidth: 18,
-      data: rows.map((r) => ({
-        value: r.heat_norm,
-        itemStyle: {
-          color: MEDALS[r.rank] || BASE_COLOR,
-          borderRadius: [0, 6, 6, 0],
-        },
-      })),
-      label: {
-        show: true,
-        position: 'right',
-        color: '#6B7280',
-        fontSize: 12,
-        formatter: (p) => Number(list.value[list.value.length - 1 - p.dataIndex].heat).toFixed(0),
-      },
-    }],
-  })
-  chart.off('click')
-  chart.on('click', (p) => {
-    const name = list.value[list.value.length - 1 - p.dataIndex]?.name
-    if (name) window.location.assign(`/papers?keyword=${encodeURIComponent(name)}`)
-  })
+function toggleCollapse() {
+  collapsed.value = !collapsed.value
 }
 
-function onResize() {
-  chart?.resize()
-}
-
-onMounted(async () => {
-  window.addEventListener('resize', onResize)
-  await load()
-})
-onUnmounted(() => {
-  window.removeEventListener('resize', onResize)
-  chart?.dispose()
-  chart = null
-})
+onMounted(load)
 watch([year, conference], load)
 
-const subtitle = computed(() =>
-  `${year.value ?? '—'} 年${conference.value ? ` · ${conference.value}` : ' · 三大会议汇总'}`)
+const subtitleText = computed(() =>
+  `${year.value ?? '—'} 年 · ${conference.value || '三大会议汇总'} · 热度 = 词频 × 年份增长率`)
 </script>
 
 <template>
-  <section class="ct-card top-card">
-    <div class="head">
-      <h2 class="title">🔥 Top10 热门方向</h2>
-      <span class="sub">{{ subtitle }}</span>
-      <div class="spacer" />
+  <section class="ct-card">
+    <div class="card-head">
+      <h2 class="title">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M3 21h18"/><rect x="5" y="10" width="3.5" height="8" rx="1"/><rect x="10.25" y="5" width="3.5" height="13" rx="1"/><rect x="15.5" y="13" width="3.5" height="5" rx="1"/></svg>
+        Top10 热门方向
+      </h2>
+      <span class="card-sub">{{ subtitleText }}</span>
+      <span class="spacer" />
       <el-select v-model="conference" size="small" style="width: 132px">
         <el-option v-for="o in confOptions" :key="o.value"
                    :label="o.label" :value="o.value" />
@@ -139,54 +71,165 @@ const subtitle = computed(() =>
                  :disabled="!years.length">
         <el-option v-for="y in years" :key="y" :label="`${y} 年`" :value="y" />
       </el-select>
+      <el-button size="small" text @click="collapsed = !collapsed">
+        {{ collapsed ? '展开' : '收起' }}
+      </el-button>
     </div>
 
     <div v-if="empty && !loading" class="empty">
-      暂无热度数据 —— 论文入库后执行
-      <code class="ct-num">POST /api/v1/stats/rebuild</code> 重算统计
+      暂无热度数据 —— 论文入库并重算统计后这里会出现榜单
     </div>
-    <div v-show="!empty" ref="chartEl" v-loading="loading"
-         class="chart ct-num" :style="{ height: '320px' }" />
-    <p class="footnote">
-      热度 = 词频 × 年份增长率；条长为 scope 内归一化热度。新爬届次的关键词
-      抽取重建后自动补齐。
+
+    <div v-else v-loading="loading" class="rank-list">
+      <div
+        v-for="(r, i) in rows"
+        :key="r.keyword_id"
+        class="rank-row"
+        :style="{ transitionDelay: (i * 40) + 'ms' }"
+      >
+        <span class="rank-badge" :class="MEDALS[i] || 'plain'">{{ i + 1 }}</span>
+        <span class="rank-name" :class="{ top3: i < 3 }">{{ r.name }}</span>
+        <div class="rank-bar">
+          <div class="rank-fill" :style="{ width: r.heat_norm + '%' }"></div>
+        </div>
+        <span class="rank-heat ct-num">{{ Math.round(r.heat) }}</span>
+        <span class="rank-freq ct-num">{{ r.freq }} 篇</span>
+      </div>
+    </div>
+
+    <p class="section-note">
+      条长 = scope 内归一化热度；排名条统一冷调主色系，前三词名加粗，徽章金银铜低饱和。条形动画用 transform: scaleX（合规约束④）。
     </p>
   </section>
 </template>
 
 <style scoped>
-.top-card {
-  margin-top: 16px;
-}
-.head {
+.card-head {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 0.625rem;
+  flex-wrap: wrap;
 }
 .title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
   margin: 0;
-  font-size: 16px;
+  font-size: 1rem;
 }
-.sub {
-  font-size: 12px;
-  color: var(--ct-text-sub);
+.title .ic {
+  color: var(--ct-primary);
+}
+.card-sub {
+  font-size: 0.75rem;
+  color: var(--ct-text-weak);
 }
 .spacer {
   flex: 1;
 }
-.chart {
-  margin-top: 12px;
-  width: 100%;
+.rank-list {
+  margin-top: 1rem;
+}
+.rank-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.625rem 0;
+  border-bottom: 1px solid rgba(35, 38, 43, 0.06);
+  transition: opacity 0.3s var(--ease, cubic-bezier(0.22, 1, 0.36, 1)),
+              transform 0.3s var(--ease, cubic-bezier(0.22, 1, 0.36, 1));
+}
+.rank-row:last-child {
+  border-bottom: none;
+}
+.rank-row:hover {
+  opacity: 0.85;
+  transform: translateX(0.125rem);
+}
+.rank-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.5rem;
+  border-radius: 0.375rem;
+  flex-shrink: 0;
+  font-family: Inter, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  font-size: 0.8125rem;
+  border: 1px solid;
+}
+.rank-badge.gold {
+  color: #8f7333;
+  border-color: #c9a85c;
+  background: linear-gradient(180deg, rgba(230, 200, 130, 0.30), rgba(200, 168, 92, 0.12));
+}
+.rank-badge.silver {
+  color: #64707f;
+  border-color: #aeb6c2;
+  background: linear-gradient(180deg, rgba(214, 220, 229, 0.38), rgba(180, 189, 201, 0.15));
+}
+.rank-badge.bronze {
+  color: #8a6236;
+  border-color: #b08250;
+  background: linear-gradient(180deg, rgba(206, 164, 118, 0.28), rgba(166, 124, 80, 0.12));
+}
+.rank-badge.plain {
+  color: var(--ct-text-weak);
+  border-color: #e2e8f0;
+  background: transparent;
+}
+.rank-name {
+  width: 9rem;
+  font-size: 0.875rem;
+  font-weight: 400;
+  flex-shrink: 0;
+}
+.rank-name.top3 {
+  font-weight: 700;
+}
+.rank-bar {
+  flex: 1;
+  height: 1.125rem;
+  background: rgba(35, 38, 43, 0.05);
+  border-radius: 0.25rem;
+  overflow: hidden;
+}
+.rank-fill {
+  height: 100%;
+  border-radius: 0.25rem;
+  transform: scaleX(0);
+  transform-origin: left;
+  animation: fill-in 0.9s var(--ease, cubic-bezier(0.22, 1, 0.36, 1)) forwards;
+  background: linear-gradient(90deg, rgba(108, 130, 180, 0.50), rgba(139, 124, 200, 0.42));
+}
+@keyframes fill-in {
+  to { transform: scaleX(1); }
+}
+.rank-heat {
+  width: 4.5rem;
+  text-align: right;
+  font-weight: 600;
+  font-size: 0.875rem;
+  flex-shrink: 0;
+}
+.rank-freq {
+  width: 5rem;
+  text-align: right;
+  font-size: 0.75rem;
+  color: var(--ct-text-weak);
+  flex-shrink: 0;
 }
 .empty {
-  padding: 40px 0;
+  padding: 3rem 0;
   text-align: center;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--ct-text-sub);
 }
-.footnote {
-  margin: 10px 0 0;
-  font-size: 12px;
-  color: #9aa4b2;
+.section-note {
+  margin: 0.625rem 0 0;
+  font-size: 0.75rem;
+  color: var(--ct-text-weak);
 }
 </style>

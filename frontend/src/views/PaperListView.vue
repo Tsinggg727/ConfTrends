@@ -233,14 +233,14 @@ onMounted(load)
 
       <!-- 空态一：有检索词但没查到 → 联网爬取兜底（原型③） -->
       <div v-else-if="missWithQuery" class="empty miss">
-        <div class="miss-title">⚠ 未找到「{{ query.q || query.keyword }}」</div>
+        <div class="miss-title"><svg class="ic" style="width:1.25rem;height:1.25rem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4"/><path d="M12 16.8v.4"/></svg> 未找到「{{ query.q || query.keyword }}」</div>
         <p class="miss-sub">
           论文库中没有匹配的记录。可以按这个题目联网爬取（CVF / ECVA），
           抓回摘要、原文链接后直接入库并返回。
         </p>
         <div class="miss-actions">
           <el-button type="primary" :loading="crawling" @click="crawlFallback">
-            🌐 联网爬取并返回
+            <svg class="ic" style="width:1rem;height:1rem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a13.5 13.5 0 0 1 0 18 13.5 13.5 0 0 1 0-18z"/></svg> 联网爬取并返回
           </el-button>
           <el-button @click="clearFilters">取消</el-button>
         </div>

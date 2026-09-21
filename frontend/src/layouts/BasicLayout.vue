@@ -108,7 +108,8 @@ onMounted(() => {
     </main>
 
     <footer class="app-footer">
-      数据来源：DBLP API / DBLP 数据集 / 会议官网 ｜ 统计口径：热度 = 词频 × 年份增长率 ｜ 仅用于课程教学
+      数据来源：CVF Open Access（CVPR / ICCV）· ECVA（ECCV）· Semantic Scholar（兜底）｜
+      统计口径：热度 = 词频 × 年份增长率 ｜ 仅用于课程教学
     </footer>
   </div>
 </template>
@@ -148,10 +149,15 @@ onMounted(() => {
   cursor: pointer;
   white-space: nowrap;
 }
+.brand-icon {
+  font-size: 22px;
+  line-height: 1;
+}
 .brand-text em {
   font-style: normal;
-  font-weight: 500;
   color: #93c5fd;
+  font-weight: 500;
+  font-size: 12px;
 }
 
 .nav {
@@ -164,24 +170,25 @@ onMounted(() => {
 .nav-link,
 .nav-back {
   padding: 6px 14px;
-  border: none;
+  border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
   color: #cbd5e1;
   font-size: 14px;
   text-decoration: none;
   cursor: pointer;
-  transition: background 0.2s, color 0.2s;
+  transition: background 0.2s, color 0.2s, opacity 0.2s;
 }
 .nav-link:hover,
 .nav-back:hover {
   background: rgba(255, 255, 255, 0.08);
   color: #fff;
 }
-/* 当前页高亮：渐变底取自设计规范 §3.1 */
+/* 当前页高亮：雾紫玻璃药丸（视觉评审定稿：全站不再出现亮蓝紫渐变） */
 .nav-link.active {
-  background: linear-gradient(135deg, var(--ct-primary), var(--ct-secondary));
-  color: #fff;
+  background: rgba(148, 163, 255, 0.16);
+  border-color: rgba(148, 163, 255, 0.35);
+  color: #dbe4ff;
   font-weight: 600;
 }
 

@@ -13,7 +13,7 @@ const items = [
 
 <template>
   <div class="source-notice">
-    <span class="notice-icon">📌</span>
+    <span class="notice-icon"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-7-5.5-7-11a7 7 0 0 1 14 0c0 5.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/></svg></span>
     <div class="notice-body">
       <div class="notice-title">数据来源与合规说明</div>
       <ul class="notice-list">
@@ -34,8 +34,12 @@ const items = [
   color: #1e40af;
 }
 .notice-icon {
-  font-size: 18px;
-  line-height: 1.4;
+  display: inline-flex;
+  color: #1d4ed8;
+}
+.notice-icon .ic {
+  width: 1.25rem;
+  height: 1.25rem;
 }
 .notice-title {
   font-weight: 600;

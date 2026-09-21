@@ -10,7 +10,6 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 
 import { useCrawlStore } from '@/stores/crawlStore'
-import SourceNotice from '@/components/crawl/SourceNotice.vue'
 import CrawlTabs from '@/components/crawl/CrawlTabs.vue'
 import SingleCrawlForm from '@/components/crawl/SingleCrawlForm.vue'
 import BatchTitlePanel from '@/components/crawl/BatchTitlePanel.vue'
@@ -35,8 +34,6 @@ onUnmounted(() => {})
 
 <template>
   <div class="crawl-view">
-    <SourceNotice />
-
     <section class="ct-card tabs-card">
       <CrawlTabs v-model:active="activeTab">
         <template #single>

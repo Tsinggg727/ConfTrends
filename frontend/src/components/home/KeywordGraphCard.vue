@@ -10,8 +10,8 @@ import * as echarts from 'echarts'
 
 import { getKeywordGraph, getKeywordPapers } from '@/api/graph'
 
-const TOP1_COLOR = '#F59E0B'
-const BASE_COLOR = '#3B82F6'
+const TOP1_COLOR = '#C9A85C'   /* 哑光金（视觉评审定稿） */
+const BASE_COLOR = '#4C6FB6'   /* 墨蓝（低饱和主色） */
 
 const year = ref(null)
 const conference = ref('')
@@ -70,7 +70,7 @@ async function load() {
     const data = await getKeywordGraph({
       year: year.value || undefined,
       conference: conference.value || undefined,
-      n: 50,
+      n: 30,
     })
     years.value = data.years
     year.value = data.year ?? data.years?.[0] ?? null
@@ -102,19 +102,26 @@ function render({ nodes, edges }) {
       data: nodes.map((n) => ({
         id: String(n.id),
         name: n.name,
-        symbolSize: 12 + (n.heat_norm / 100) * 34,
+        symbolSize: 30 + (n.heat_norm / 100) * 50,
         itemStyle: { color: n.id === top1.id ? TOP1_COLOR : BASE_COLOR },
         df: n.df,
         heat: n.heat,
-        label: { show: n.heat_norm > 45 || n.id === top1.id },
+        /* 词放在圆圈内（视觉反馈：词入圆内），小节点字号缩小 */
+        label: {
+          show: true,
+          position: 'inside',
+          color: '#fff',
+          fontSize: 12,
+          fontWeight: 600,
+        },
       })),
       links: edges.map((e) => ({
         source: String(e.source),
         target: String(e.target),
         lineStyle: { width: Math.min(1 + e.weight * 0.4, 5), opacity: 0.25 },
       })),
-      force: { repulsion: 260, edgeLength: [60, 140], gravity: 0.12 },
-      label: { position: 'right', color: '#1F2937' },
+      force: { repulsion: 3200, edgeLength: [150, 320], gravity: 0.015 },
+      label: { position: 'inside', color: '#fff' },
       emphasis: { focus: 'adjacency', lineStyle: { opacity: 0.6 } },
       lineStyle: { color: '#94A3B8', curveness: 0.1 },
     }],
@@ -147,7 +154,10 @@ const subtitle = computed(() =>
 <template>
   <section class="ct-card graph-card">
     <div class="head">
-      <h2 class="title">🕸 关键词图谱</h2>
+      <h2 class="title">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="5" cy="6" r="2.2"/><circle cx="19" cy="5" r="2.6"/><circle cx="12" cy="14" r="3.2"/><circle cx="5" cy="19" r="2"/><path d="M6.9 7.3 9.9 11.8M17 6.4 14.3 11.2M6.7 17.7 9.3 16.2M16.9 16.9l-2.6-1.5"/></svg>
+        关键词图谱
+      </h2>
       <span class="sub">{{ subtitle }} · 节点大小 = 热度，连线 = 同论文共现</span>
       <div class="spacer" />
       <el-select v-model="conference" size="small" style="width: 132px">
@@ -167,10 +177,11 @@ const subtitle = computed(() =>
          class="chart" :style="{ height: '440px' }" />
     <p v-if="!empty" class="footnote">点击节点查看相关论文；滚轮缩放，拖拽布局。</p>
 
-    <el-dialog
+    <el-drawer
       v-model="dialogVisible"
+      direction="rtl"
+      size="440px"
       :title="`「${dialogKeyword?.name}」相关论文（${papersTotal} 篇）`"
-      width="640px"
     >
       <div v-loading="papersLoading" class="dialog-body">
         <div v-if="!papers.length" class="dialog-empty">没有关联论文</div>
@@ -195,7 +206,7 @@ const subtitle = computed(() =>
         <el-button @click="dialogVisible = false">关闭</el-button>
         <el-button type="primary" @click="goPaperList">去论文列表查看 →</el-button>
       </template>
-    </el-dialog>
+    </el-drawer>
   </section>
 </template>
 
@@ -210,8 +221,14 @@ const subtitle = computed(() =>
   flex-wrap: wrap;
 }
 .title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
   margin: 0;
   font-size: 16px;
+}
+.title .ic {
+  color: var(--ct-primary);
 }
 .sub {
   font-size: 12px;

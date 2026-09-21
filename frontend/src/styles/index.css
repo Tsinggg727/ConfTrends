@@ -1,9 +1,9 @@
-/* 全局样式与设计令牌 —— 色值取自《原型设计初稿 v3》§3.1 */
+/* 全局样式与设计令牌 —— 色值取自《原型设计初稿 v3》§3.1，经视觉评审降饱和 */
 :root {
   --ct-navy: #0f172a;      /* 导航底 / 深色区 */
-  --ct-primary: #3b82f6;   /* 主色 科技蓝 */
-  --ct-secondary: #8b5cf6; /* 辅色 紫 */
-  --ct-accent: #f59e0b;    /* 强调 Top1 高亮 */
+  --ct-primary: #4c6fb6;   /* 主色 墨蓝（低饱和） */
+  --ct-secondary: #8b7bd0; /* 辅色 雾紫（低饱和） */
+  --ct-accent: #c9a85c;    /* 强调 哑光金（Top1 高亮 / 金银铜徽章） */
   --ct-bg: #f5f7fa;
   --ct-card: #ffffff;
   --ct-text: #1f2937;
@@ -11,9 +11,33 @@
   --ct-success: #10b981;
   --ct-danger: #ef4444;
   --ct-radius: 12px;
+
+  /* Element Plus 主题对齐（只换主色族，组件库其余令牌不动） */
+  --el-color-primary: var(--ct-primary);
+  --el-table-row-hover-bg-color: rgba(76, 111, 182, 0.06);
+  --el-color-primary-dark-2: #3f5da0;
+  --el-color-primary-light-3: #728fc6;
+  --el-color-primary-light-5: #93a8d4;
+  --el-color-primary-light-7: #b9c7e3;
+  --el-color-primary-light-8: #ccd7ec;
+  --el-color-primary-light-9: #e4eaf5;
 }
 
 * { box-sizing: border-box; }
+
+/* 选择框半透明玻璃化（视觉反馈：所有选择框增加透明度） */
+.el-select__wrapper {
+  background-color: rgba(255, 255, 255, 0.60);
+  backdrop-filter: blur(0.375rem);
+  box-shadow: 0 0 0 1px rgba(35, 38, 43, 0.10) inset;
+}
+
+/* 全站统一线性图标尺寸（内联 SVG 用） */
+.ic {
+  width: 1.125rem;
+  height: 1.125rem;
+  flex-shrink: 0;
+}
 
 html, body, #app {
   height: 100%;
@@ -21,6 +45,7 @@ html, body, #app {
 }
 
 body {
+  overflow-x: clip;   /* Hero 全幅出血兜底：clip 不产生滚动容器，不影响 sticky */
   background: var(--ct-bg);
   color: var(--ct-text);
   font-family: 'Microsoft YaHei', 'PingFang SC', 'Helvetica Neue', Arial, sans-serif;
@@ -33,12 +58,19 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-/* 圆角卡片 + 轻阴影 */
+/* 半透明渐变卡片（视觉评审定稿：全站唯一卡片风格，透出背景层次） */
 .ct-card {
-  background: var(--ct-card);
+  position: relative;
+  background: linear-gradient(135deg, rgba(76, 111, 182, 0.06), rgba(139, 124, 208, 0.09));
   border-radius: var(--ct-radius);
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06), 0 8px 24px rgba(15, 23, 42, 0.04);
-  padding: 20px;
+  box-shadow: var(--shadow, 0 2px 8px rgba(15, 23, 42, 0.06));
+  padding: 1.5rem;
+  transition: transform 0.2s var(--ease, cubic-bezier(0.22, 1, 0.36, 1)),
+              box-shadow 0.2s var(--ease, cubic-bezier(0.22, 1, 0.36, 1));
+}
+.ct-card:hover {
+  transform: translateY(-0.125rem);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.10);
 }
 
 /* 页面级占位块，骨架阶段给未实现的页面用 */
@@ -55,4 +87,33 @@ body {
   font-size: 20px;
   font-weight: 600;
   color: var(--ct-text);
+}
+
+/* shimmer 骨架屏（约束⑦）：滑块用 transform 实现，不触发布局 */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  border-radius: 0.5rem;
+  background: rgba(35, 38, 43, 0.06);
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.65), transparent);
+  animation: shimmer 1.4s infinite;
+}
+@keyframes shimmer {
+  to { transform: translateX(100%); }
+}
+
+/* 论文列表行 hover 左侧主色指示条（原型③；inset box-shadow 不触发布局） */
+.el-table__body tr:hover > td.el-table__cell:first-child {
+  box-shadow: inset 0.1875rem 0 0 var(--ct-primary);
+}
+
+/* EP 将 hover 变量定义在 .el-table 上（比 :root 更近），必须同级覆写才生效 */
+.el-table {
+  --el-table-row-hover-bg-color: rgba(76, 111, 182, 0.06);
 }
