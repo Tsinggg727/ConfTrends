@@ -14,7 +14,7 @@ import { getTrend } from '@/api/stats'
 /* 低饱和三色族调色板（视觉评审定稿：哑光金 / 墨蓝 / 雾紫及中性扩展） */
 const PALETTE = ['#C9A85C', '#4C6FB6', '#7B6FC0', '#8F7333', '#3A5590',
   '#9B8CCB', '#B08250', '#64707F', '#AEB6C2', '#7B8A9E']
-const FRAME_MS = 1000                        // 原型：1 帧 / 秒
+const FRAME_MS = 3000                        // 帧间隔 = 动画时长：每 3s 沿轴推进一年（视觉反馈）
 
 const conferences = ref(['CVPR', 'ICCV', 'ECCV'])
 const years = ref([])                        // 窗口内的全部年份（升序）
@@ -34,17 +34,21 @@ const confOptions = [
   { value: 'ECCV', label: 'ECCV' },
 ]
 
-const visibleYears = computed(() => years.value.slice(0, frame.value + 1))
 const progress = computed(() =>
   years.value.length ? ((frame.value + 1) / years.value.length) * 100 : 0)
 
-/** 每词每年的热度 = 该年各选中会议 heat 之和；tooltip 的会议明细随行携带 */
-const trendSeries = computed(() => {
-  const visible = new Set(visibleYears.value)
+/** X 轴固定为全部年份（2022–2026），不随播放帧变化 */
+const xData = computed(() => years.value)
+
+/** 第 frame 帧的系列：数据点逐个追加（只含 years[0..frame] 的点）。
+ *  每词每年的热度 = 该年各选中会议 heat 之和；tooltip 的会议明细随行携带。 */
+const frameSeries = computed(() => {
+  const n = frame.value + 1
+  const shown = new Set(years.value.slice(0, n))
   return series.value.map((s) => {
     const byYear = {}
     for (const d of s.data) {
-      if (!visible.has(d.year)) continue
+      if (!shown.has(d.year)) continue
       byYear[d.year] = byYear[d.year] || { total: 0, confs: [] }
       byYear[d.year].total += d.heat
       byYear[d.year].confs.push({ conference: d.conference, freq: d.freq, heat: d.heat })
@@ -54,7 +58,7 @@ const trendSeries = computed(() => {
       type: 'line',
       smooth: true,
       symbolSize: 7,
-      data: years.value.map((y) => byYear[y]
+      data: years.value.slice(0, n).map((y) => byYear[y]
         ? { value: Number(byYear[y].total.toFixed(1)), confs: byYear[y].confs }
         : { value: 0, confs: [] }),
       lineStyle: { width: 2.4 },
@@ -63,13 +67,17 @@ const trendSeries = computed(() => {
   })
 })
 
-function render() {
+async function render(replaceSeries = false) {
   if (!chartEl.value) return
   if (!chart) chart = echarts.init(chartEl.value)
+  await nextTick()   // 等布局生效（v-show 刚翻转时容器可能还没完成布局）
+  chart.resize()     // 容器尺寸可能已变化，重测后再绘制
   chart.setOption({
     color: PALETTE,
-    animationDuration: 600,
-    animationEasing: 'linear',
+    animationDuration: 3000,
+    animationEasing: 'cubicOut',
+    animationDurationUpdate: 3000,
+    animationEasingUpdate: 'cubicOut',
     grid: { left: 56, right: 24, top: 36, bottom: 40 },
     tooltip: {
       trigger: 'axis',
@@ -102,7 +110,7 @@ function render() {
     xAxis: {
       type: 'category',
       boundaryGap: false,
-      data: visibleYears.value,
+      data: xData.value,
       axisLine: { lineStyle: { color: '#E2E8F0' } },
       axisLabel: { color: '#6B7280' },
     },
@@ -113,8 +121,11 @@ function render() {
       splitLine: { lineStyle: { color: '#F1F5F9' } },
       axisLabel: { color: '#6B7280' },
     },
-    series: trendSeries.value,
-  }, true)
+    series: frameSeries.value,
+  },
+  // 合并式更新：只增量变更 series 数据，动画表现为「沿 X 轴追加生长」；
+  // replaceSeries=true 时（重载/切换口径）整体替换，清掉不再存在的旧系列
+  replaceSeries ? { replaceMerge: ['series'] } : undefined)
 }
 
 // ---------- 播放控制 ----------
@@ -183,7 +194,10 @@ onUnmounted(() => {
   chart = null
 })
 watch(conferences, load)
-watch(trendSeries, render)
+watch(loading, (v) => {
+  if (!v) render(true)          // 新语料加载完成：整体替换（清掉旧关键词系列）
+})
+watch(frameSeries, () => render())   // 播放/追加帧：合并式增量更新
 </script>
 
 <template>
@@ -224,7 +238,7 @@ watch(trendSeries, render)
         <div class="track-row">
           <span class="label">年份进度</span>
           <div class="track" @click="seekFromTrack">
-            <div class="fill" :style="{ width: progress + '%' }" />
+            <div class="fill" :style="{ transform: `scaleX(${progress / 100})` }" />
           </div>
           <span class="frame ct-num">
             {{ years[frame] || '—' }}
@@ -247,7 +261,7 @@ watch(trendSeries, render)
           <el-button size="small" :disabled="!years.length" @click="stepFrame(1)">
             下一帧
           </el-button>
-          <span class="chip ct-num">帧率 1 帧 / 秒</span>
+          <span class="chip ct-num">每年 3 秒</span>
         </div>
       </div>
     </section>
@@ -326,9 +340,12 @@ watch(trendSeries, render)
 }
 .fill {
   height: 100%;
+  width: 100%;
   border-radius: 999px;
   background: linear-gradient(90deg, var(--ct-primary), var(--ct-secondary));
-  transition: width 0.25s linear;
+  transform: scaleX(0);                        /* 进度用 scaleX 表现，宽度恒定 */
+  transform-origin: left;
+  transition: transform 2.8s linear;           /* 与帧间隔(3s)接近，视觉同步 */
 }
 .frame {
   width: 48px;
