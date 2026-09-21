@@ -1,8 +1,9 @@
 """蓝图注册。新增蓝图时在 BLUEPRINTS 里追加即可。
 
-系统设计 §3 规划了 6 组接口，当前已实现 meta / papers / crawl / keywords /
-stats 五组，conferences 随功能迭代补上。
+系统设计 §3 规划的 6 组接口已全部实现：
+meta / papers / crawl / keywords / stats / graph / conferences。
 """
+from .conferences import bp as conferences_bp
 from .crawl import bp as crawl_bp
 from .graph import bp as graph_bp
 from .keywords import bp as keywords_bp
@@ -17,6 +18,7 @@ BLUEPRINTS = (
     keywords_bp,
     stats_bp,
     graph_bp,
+    conferences_bp,
 )
 
 
