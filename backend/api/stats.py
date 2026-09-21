@@ -32,7 +32,7 @@ def stats_top():
     """Top N 热词榜：热度 = 词频 × 年份增长率（系统设计 §2.5）。
 
     参数：
-        year        统计年份，缺省 = 表里最新一年
+        year        统计年份或 total（跨年总计，各年热度加总），缺省 = 表里最新一年
         conference  CVPR / ICCV / ECCV，缺省 = 三大会议汇总
         n           榜单长度，缺省 10，上限 50
     """
@@ -40,9 +40,14 @@ def stats_top():
         "SELECT DISTINCT year FROM hot_keyword_stat ORDER BY year DESC")]
 
     raw_year = (request.args.get("year") or "").strip()
-    if raw_year and not raw_year.isdigit():
-        return fail(400, "year 必须是整数"), 400
-    year = int(raw_year) if raw_year else (years[0] if years else None)
+    if raw_year and raw_year != "total" and not raw_year.isdigit():
+        return fail(400, "year 必须是整数或 total"), 400
+    if raw_year == "total":
+        year = "total"
+    elif raw_year.isdigit():
+        year = int(raw_year)
+    else:
+        year = years[0] if years else None
 
     conf_code = (request.args.get("conference") or "").strip().upper()
     if conf_code and conf_code not in CONFERENCE_CODES:
@@ -64,26 +69,47 @@ def stats_top():
     if conf_code:
         row = query_one("SELECT id FROM conference WHERE code = ?", (conf_code,))
         conference_id = row["id"] if row else None
-    rows = query_all(
-        """SELECT s.keyword_id, k.name, s.freq, s.prev_freq, s.growth_rate,
-                  s.heat, s.heat_norm, s.rank
-             FROM hot_keyword_stat s JOIN keyword k ON k.id = s.keyword_id
-            WHERE s.year = ?
-              AND s.conference_id IS ?
-              AND s.keyword_id IN (
-                    SELECT keyword_id FROM paper_keyword
-                    GROUP BY keyword_id HAVING COUNT(*) >= ?)
-            ORDER BY s.rank
-            LIMIT ?""",
-        (year, conference_id, min_df, n),
-    )
+
+    if year == "total":
+        # 跨年总计口径：各年热度加总（论文按年天然不重叠，freq 相加即总数），
+        # heat_norm / rank 在返回的榜单内重算；prev_freq / growth_rate 跨年
+        # 无意义，不返回
+        rows = query_all(
+            """SELECT s.keyword_id, k.name, SUM(s.freq) AS freq, SUM(s.heat) AS heat
+                 FROM hot_keyword_stat s JOIN keyword k ON k.id = s.keyword_id
+                WHERE s.conference_id IS ?
+                  AND s.keyword_id IN (
+                        SELECT keyword_id FROM paper_keyword
+                        GROUP BY keyword_id HAVING COUNT(*) >= ?)
+                GROUP BY s.keyword_id
+                ORDER BY heat DESC
+                LIMIT ?""",
+            (conference_id, min_df, n),
+        )
+        max_heat = (rows[0]["heat"] if rows else 0) or 1.0
+        stat_list = [dict(r, heat_norm=round(r["heat"] / max_heat * 100, 2), rank=i)
+                     for i, r in enumerate(rows, start=1)]
+    else:
+        stat_list = [dict(r) for r in query_all(
+            """SELECT s.keyword_id, k.name, s.freq, s.prev_freq, s.growth_rate,
+                      s.heat, s.heat_norm, s.rank
+                 FROM hot_keyword_stat s JOIN keyword k ON k.id = s.keyword_id
+                WHERE s.year = ?
+                  AND s.conference_id IS ?
+                  AND s.keyword_id IN (
+                        SELECT keyword_id FROM paper_keyword
+                        GROUP BY keyword_id HAVING COUNT(*) >= ?)
+                ORDER BY s.rank
+                LIMIT ?""",
+            (year, conference_id, min_df, n),
+        )]
 
     return ok({
         "year": year,
         "conference": conf_code or None,
         "n": n,
         "years": years,
-        "list": [dict(r) for r in rows],
+        "list": stat_list,
     })
 
 

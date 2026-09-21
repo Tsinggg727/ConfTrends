@@ -1,6 +1,7 @@
 """关键词图谱接口 —— 功能4（原型① 的图谱区）。
 
     GET /api/v1/graph/keywords?year=&conference=&n=50   节点 + 共现边
+        （year=total 为跨年总计口径；响应带 years 供年份下拉）
     GET /api/v1/graph/keywords/<id>/papers?page=        该词下的相关论文（分页）
 
 口径：
@@ -28,16 +29,22 @@ MAX_GRAPH_N = 200
 
 
 def _resolve_scope(args):
-    """解析 year / conference：year 缺省 = 统计表最新一年；conference
-    缺省 = 汇总（conference_id NULL）。返回 (year, conference_id, conf_code)。
-    参数不合法抛 None（由调用方转 400）—— 用哨兵区分「参数错」和「查无」。"""
+    """解析 year / conference：year = 具体年份或 'total'（跨年总计）；
+    缺省 = 统计表最新一年。conference 缺省 = 汇总（conference_id NULL）。
+    返回 (year, conference_id, conf_code, years)。
+    参数不合法抛 None（由调用方转 400）。"""
     years = [r["year"] for r in query_all(
         "SELECT DISTINCT year FROM hot_keyword_stat ORDER BY year DESC")]
 
     raw_year = (args.get("year") or "").strip()
-    if raw_year and not raw_year.isdigit():
+    if raw_year and raw_year != "total" and not raw_year.isdigit():
         return None
-    year = int(raw_year) if raw_year else (years[0] if years else None)
+    if raw_year == "total":
+        year = "total"
+    elif raw_year.isdigit():
+        year = int(raw_year)
+    else:
+        year = years[0] if years else None
 
     conf_code = (args.get("conference") or "").strip().upper()
     if conf_code and conf_code not in CONFERENCE_CODES:
@@ -47,7 +54,7 @@ def _resolve_scope(args):
         row = query_one("SELECT id FROM conference WHERE code = ?", (conf_code,))
         conference_id = row["id"] if row else None
 
-    return year, conference_id, conf_code or None
+    return year, conference_id, conf_code or None, years
 
 
 @bp.get("/graph/keywords")
@@ -55,9 +62,9 @@ def keyword_graph():
     args = request.args
     scope = _resolve_scope(args)
     if scope is None:
-        return fail(400, "year 必须是整数；conference 必须是 "
+        return fail(400, "year 必须是整数或 total；conference 必须是 "
                          f"{' / '.join(CONFERENCE_CODES)} 之一"), 400
-    year, conference_id, conf_code = scope
+    year, conference_id, conf_code, years = scope
 
     raw_n = (args.get("n") or "").strip()
     if raw_n and not raw_n.isdigit():
@@ -65,7 +72,7 @@ def keyword_graph():
     n = min(max(int(raw_n), 1), MAX_GRAPH_N) if raw_n else DEFAULT_GRAPH_N
 
     if year is None:
-        return ok({"year": None, "conference": conf_code, "n": n,
+        return ok({"year": None, "conference": conf_code, "n": n, "years": years,
                    "nodes": [], "edges": []})
 
     # DF 门槛（方案A）：全局 DF ≥ 图谱阈值才准入；DF 从 graph_keywords 的
@@ -74,42 +81,65 @@ def keyword_graph():
     df_map = {r["id"]: r["df"]
               for r in kw.graph_keywords(min_df=min_df)}
 
-    scope_rows = query_all(
-        """SELECT s.keyword_id AS id, k.name, s.freq, s.heat, s.heat_norm
-             FROM hot_keyword_stat s JOIN keyword k ON k.id = s.keyword_id
-            WHERE s.year = ? AND s.conference_id IS ?
-            ORDER BY s.heat DESC""",
-        (year, conference_id))
-    nodes = [{"id": r["id"], "name": r["name"], "df": df_map[r["id"]],
-              "freq": r["freq"], "heat": r["heat"], "heat_norm": r["heat_norm"]}
-             for r in scope_rows if r["id"] in df_map][:n]
+    if year == "total":
+        # 跨年总计口径：各年热度加总（论文按年天然不重叠，freq 相加即总数），
+        # heat_norm 在选出的节点内重新归一化
+        rows = query_all(
+            """SELECT s.keyword_id AS id, k.name,
+                      SUM(s.freq) AS freq, SUM(s.heat) AS heat
+                 FROM hot_keyword_stat s JOIN keyword k ON k.id = s.keyword_id
+                WHERE s.conference_id IS ?
+                GROUP BY s.keyword_id""",
+            (conference_id,))
+        picked = sorted((r for r in rows if r["id"] in df_map),
+                        key=lambda r: (-r["heat"], -r["freq"], r["id"]))[:n]
+        max_heat = (picked[0]["heat"] if picked else 0) or 1.0
+        nodes = [{"id": r["id"], "name": r["name"], "df": df_map[r["id"]],
+                  "freq": r["freq"], "heat": r["heat"],
+                  "heat_norm": round(r["heat"] / max_heat * 100, 2)}
+                 for r in picked]
+    else:
+        scope_rows = query_all(
+            """SELECT s.keyword_id AS id, k.name, s.freq, s.heat, s.heat_norm
+                 FROM hot_keyword_stat s JOIN keyword k ON k.id = s.keyword_id
+                WHERE s.year = ? AND s.conference_id IS ?
+                ORDER BY s.heat DESC""",
+            (year, conference_id))
+        nodes = [{"id": r["id"], "name": r["name"], "df": df_map[r["id"]],
+                  "freq": r["freq"], "heat": r["heat"], "heat_norm": r["heat_norm"]}
+                 for r in scope_rows if r["id"] in df_map][:n]
 
     if len(nodes) < 2:
-        return ok({"year": year, "conference": conf_code, "n": n,
+        return ok({"year": year, "conference": conf_code, "n": n, "years": years,
                    "nodes": nodes, "edges": []})
 
     # 共现边：同论文同现的两个节点词；只在 scope 内的论文上统计
     ids = [nd["id"] for nd in nodes]
     marks = ",".join("?" * len(ids))
-    paper_where = ["p2.year = ?"]
-    edge_params = [year]
+    paper_where = []
+    edge_params = []
+    if year != "total":                    # 总计口径不按年过滤，跨全部年份
+        paper_where.append("p2.year = ?")
+        edge_params.append(year)
     if conference_id is not None:
         paper_where.append("p2.conference_id = ?")
         edge_params.append(conference_id)
+    paper_filter = f" WHERE {' AND '.join(paper_where)}" if paper_where else ""
     rows = query_all(
         f"""SELECT pk1.keyword_id AS source, pk2.keyword_id AS target,
                    COUNT(DISTINCT pk1.paper_id) AS weight
               FROM paper_keyword pk1
               JOIN paper_keyword pk2
                 ON pk2.paper_id = pk1.paper_id AND pk2.keyword_id > pk1.keyword_id
-             WHERE pk1.paper_id IN (SELECT p2.id FROM paper p2 WHERE {" AND ".join(paper_where)})
+             WHERE pk1.paper_id IN (SELECT p2.id FROM paper p2{paper_filter})
                AND pk1.keyword_id IN ({marks})
                AND pk2.keyword_id IN ({marks})
              GROUP BY pk1.keyword_id, pk2.keyword_id""",
         edge_params + ids + ids)
-    edges = [dict(r) for r in rows]
+    # count 与 weight 同值：前端 tooltip 以 count ?? weight 兜底展示
+    edges = [dict(r, count=r["weight"]) for r in rows]
 
-    return ok({"year": year, "conference": conf_code, "n": n,
+    return ok({"year": year, "conference": conf_code, "n": n, "years": years,
                "nodes": nodes, "edges": edges})
 
 

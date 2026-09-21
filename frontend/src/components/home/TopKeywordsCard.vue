@@ -11,8 +11,8 @@ import { getTopStats } from '@/api/stats'
 
 const MEDALS = ['gold', 'silver', 'bronze']
 
-const year = ref(null)
-const conference = ref('')
+const year = ref('total')
+const conference = ref('all')
 const years = ref([])
 const loading = ref(true)
 const empty = ref(false)
@@ -20,22 +20,27 @@ const collapsed = ref(false)
 const rows = ref([])
 
 const confOptions = [
-  { value: '', label: '三大会议汇总' },
+  { value: 'all', label: '三大会议汇总' },
   { value: 'CVPR', label: 'CVPR' },
   { value: 'ICCV', label: 'ICCV' },
   { value: 'ECCV', label: 'ECCV' },
 ]
 
+// 年份下拉：总计（跨全部年份）+ 各年份升序；默认选总计
+const yearsAsc = computed(() => [...years.value].sort((a, b) => a - b))
+const totalLabel = computed(() => yearsAsc.value.length
+  ? `${yearsAsc.value[0]}–${yearsAsc.value[yearsAsc.value.length - 1]} 总计`
+  : '全部年份总计')
+
 async function load() {
   loading.value = true
   try {
     const data = await getTopStats({
-      year: year.value || undefined,
-      conference: conference.value || undefined,
+      year: year.value,
+      conference: conference.value === 'all' ? undefined : conference.value,
       n: 10,
     })
-    years.value = data.years
-    year.value = data.year ?? data.years?.[0] ?? null
+    years.value = data.years ?? []
     rows.value = data.list
     empty.value = !data.list.length
   } finally {
@@ -51,7 +56,9 @@ onMounted(load)
 watch([year, conference], load)
 
 const subtitleText = computed(() =>
-  `${year.value ?? '—'} 年 · ${conference.value || '三大会议汇总'} · 热度 = 词频 × 年份增长率`)
+  `${year.value === 'total' ? totalLabel.value : `${year.value} 年`}`
+  + ` · ${conference.value === 'all' ? '三大会议汇总' : conference.value}`
+  + ' · 热度 = 词频 × 年份增长率')
 </script>
 
 <template>
@@ -67,9 +74,9 @@ const subtitleText = computed(() =>
         <el-option v-for="o in confOptions" :key="o.value"
                    :label="o.label" :value="o.value" />
       </el-select>
-      <el-select v-model="year" size="small" style="width: 96px"
-                 :disabled="!years.length">
-        <el-option v-for="y in years" :key="y" :label="`${y} 年`" :value="y" />
+      <el-select v-model="year" size="small" style="width: 132px">
+        <el-option :label="totalLabel" value="total" />
+        <el-option v-for="y in yearsAsc" :key="y" :label="`${y} 年`" :value="y" />
       </el-select>
       <el-button size="small" text @click="collapsed = !collapsed">
         {{ collapsed ? '展开' : '收起' }}

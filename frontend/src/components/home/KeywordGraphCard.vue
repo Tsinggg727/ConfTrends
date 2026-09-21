@@ -13,8 +13,8 @@ import { getKeywordGraph, getKeywordPapers } from '@/api/graph'
 const TOP1_COLOR = '#C9A85C'   /* 哑光金（视觉评审定稿） */
 const BASE_COLOR = '#4C6FB6'   /* 墨蓝（低饱和主色） */
 
-const year = ref(null)
-const conference = ref('')
+const year = ref('total')
+const conference = ref('all')
 const years = ref([])
 const loading = ref(true)
 const empty = ref(false)
@@ -23,11 +23,17 @@ const chartEl = ref(null)
 let chart = null
 
 const confOptions = [
-  { value: '', label: '三大会议汇总' },
+  { value: 'all', label: '三大会议汇总' },
   { value: 'CVPR', label: 'CVPR' },
   { value: 'ICCV', label: 'ICCV' },
   { value: 'ECCV', label: 'ECCV' },
 ]
+
+// 年份下拉：总计（跨全部年份）+ 各年份升序；默认选总计
+const yearsAsc = computed(() => [...years.value].sort((a, b) => a - b))
+const totalLabel = computed(() => yearsAsc.value.length
+  ? `${yearsAsc.value[0]}–${yearsAsc.value[yearsAsc.value.length - 1]} 总计`
+  : '全部年份总计')
 
 // ---------- 相关论文弹窗 ----------
 const dialogVisible = ref(false)
@@ -68,12 +74,11 @@ async function load() {
   loading.value = true
   try {
     const data = await getKeywordGraph({
-      year: year.value || undefined,
-      conference: conference.value || undefined,
+      year: year.value,
+      conference: conference.value === 'all' ? undefined : conference.value,
       n: 30,
     })
-    years.value = data.years
-    year.value = data.year ?? data.years?.[0] ?? null
+    years.value = data.years ?? []
     empty.value = !data.nodes.length
     await nextTick()
     render(data)
@@ -92,7 +97,7 @@ function render({ nodes, edges }) {
     tooltip: {
       formatter: (p) => p.dataType === 'node'
         ? `<b>${p.data.name}</b><br/>DF ${p.data.df} ｜ 热度 ${Number(p.data.heat).toFixed(1)} ｜ 共现边 ${p.data.degree ?? '—'}`
-        : `共现 ${p.data.weight} 篇`,
+        : `共现 ${p.data.count ?? p.data.weight ?? 0} 篇`,
     },
     series: [{
       type: 'graph',
@@ -118,7 +123,12 @@ function render({ nodes, edges }) {
       links: edges.map((e) => ({
         source: String(e.source),
         target: String(e.target),
-        lineStyle: { width: Math.min(1 + e.weight * 0.4, 5), opacity: 0.25 },
+        count: e.count,
+        weight: e.weight,
+        lineStyle: {
+          width: Math.min(1 + (e.count ?? e.weight ?? 0) * 0.4, 5),
+          opacity: 0.25,
+        },
       })),
       force: { repulsion: 3200, edgeLength: [150, 320], gravity: 0.015 },
       label: { position: 'inside', color: '#fff' },
@@ -148,7 +158,8 @@ onUnmounted(() => {
 watch([year, conference], load)
 
 const subtitle = computed(() =>
-  `${year.value ?? '—'} 年${conference.value ? ` · ${conference.value}` : ' · 三大会议汇总'}`)
+  `${year.value === 'total' ? totalLabel.value : `${year.value} 年`}`
+  + ` · ${conference.value === 'all' ? '三大会议汇总' : conference.value}`)
 </script>
 
 <template>
@@ -164,9 +175,9 @@ const subtitle = computed(() =>
         <el-option v-for="o in confOptions" :key="o.value"
                    :label="o.label" :value="o.value" />
       </el-select>
-      <el-select v-model="year" size="small" style="width: 96px"
-                 :disabled="!years.length">
-        <el-option v-for="y in years" :key="y" :label="`${y} 年`" :value="y" />
+      <el-select v-model="year" size="small" style="width: 132px">
+        <el-option :label="totalLabel" value="total" />
+        <el-option v-for="y in yearsAsc" :key="y" :label="`${y} 年`" :value="y" />
       </el-select>
     </div>
 
@@ -181,6 +192,7 @@ const subtitle = computed(() =>
       v-model="dialogVisible"
       direction="rtl"
       size="440px"
+      append-to-body
       :title="`「${dialogKeyword?.name}」相关论文（${papersTotal} 篇）`"
     >
       <div v-loading="papersLoading" class="dialog-body">
