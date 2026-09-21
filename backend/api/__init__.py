@@ -4,6 +4,7 @@
 stats 五组，conferences 随功能迭代补上。
 """
 from .crawl import bp as crawl_bp
+from .graph import bp as graph_bp
 from .keywords import bp as keywords_bp
 from .meta import bp as meta_bp
 from .papers import bp as papers_bp
@@ -15,6 +16,7 @@ BLUEPRINTS = (
     crawl_bp,
     keywords_bp,
     stats_bp,
+    graph_bp,
 )
 
 

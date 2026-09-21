@@ -10,6 +10,7 @@ import { getHealth } from '@/api/meta'
 import { listPapers } from '@/api/paper'
 import { useGlobalStore } from '@/stores/globalStore'
 import TopKeywordsCard from '@/components/home/TopKeywordsCard.vue'
+import KeywordGraphCard from '@/components/home/KeywordGraphCard.vue'
 
 const globalStore = useGlobalStore()
 
@@ -61,12 +62,7 @@ onMounted(async () => {
 
     <TopKeywordsCard />
 
-    <PagePlaceholder
-      title="关键词图谱（功能4 预告）"
-      desc="节点大小 = 热度、Top1 高亮、全屏与右侧相关论文抽屉 —— 随功能4 接入。"
-      ref="系统设计 §5-①"
-      :modules="['搜索框 + 热门快捷标签', '关键词图谱 + 全屏', '右侧相关论文抽屉']"
-    />
+    <KeywordGraphCard />
   </div>
 </template>
 
