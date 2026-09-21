@@ -52,7 +52,12 @@ paper papers method methods approach approaches propose proposes proposed
 proposing result results show shows showed shown showing demonstrate
 demonstrates demonstrated demonstrating experiment experiments experimental
 based using use uses used novel existing various extensive multiple
+kind growth exit additional single size third
 """.split())
+# ↑ 末行是弱实词边界表（评估报告方案C）：这些词永远不构成概念，放进
+# STOPWORDS（从 token 流删除）而不是 UNIGRAM_BANNED，一举两得 —— 单字
+# 不再成词，且它们参与的碎片 bigram（single blurry / size kernel /
+# third kind）从源头消失，旁边真正的概念（blurry image）反而能浮现。
 
 # 同义词短语 → 规范词。键是「归一化后的 token 序列」，在停用词过滤**之前**
 # 整体替换 —— 这样 "3D Gaussian Splatting" 和 "gaussian splatting" 都归到
@@ -108,6 +113,16 @@ WORD_FOLD = {
 UNIGRAM_BANNED = frozenset("""
 model image feature task text system signal
 mse psnr ssim lpips rmse iou fps frossl
+""".split())
+
+# 缩写假词门槛（评估报告方案C）：≤3 字母的纯字母 token，若 DF≤2 且不在
+# 方向名白名单，不作候选 —— 杀掉 ttt/ed/bo sd 这类无方向信息的缩写碎片，
+# 同时保住 clip/nerf/3dgs 这类已成为方向名的方法缩写（白名单显式豁免；
+# 且高频方向名 DF 远超门槛，有双重保护，结构性不可能被误杀）。
+ACRONYM_MAX_LEN = 3
+ACRONYM_MAX_DF = 2
+ACRONYM_WHITELIST = frozenset("""
+clip nerf 3dgs gan cnn vit llm vqa ocr ssl ir peft rnn vlm
 """.split())
 
 _TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9\-']*")
@@ -221,16 +236,22 @@ def _candidates(sentences):
 # ---------------------------------------------------------------
 # TF-IDF（全量语料统一算 IDF —— §1.1 阶段五的硬要求）
 # ---------------------------------------------------------------
+def doc_freq(doc_terms):
+    """doc_terms: 每篇的候选集合列表 → {候选: DF（出现的文档数）}。"""
+    df = Counter()
+    for cands in doc_terms:
+        df.update(cands)
+    return df
+
+
 def compute_idf(doc_tokens):
     """doc_tokens: 每篇的候选集合列表 → {候选: IDF}。
 
     平滑式 idf = ln((1+N)/(1+df)) + 1：全语料都出现的候选 IDF 最低但
     不为 0，避免「词太常见」直接把权重打穿成 0。
     """
+    df = doc_freq(doc_tokens)
     n_docs = len(doc_tokens)
-    df = Counter()
-    for cands in doc_tokens:
-        df.update(cands)
     return {term: math.log((1 + n_docs) / (1 + df_c)) + 1.0
             for term, df_c in df.items()}
 
@@ -267,15 +288,24 @@ def _textrank(sentences):
 # ---------------------------------------------------------------
 # 单篇抽取
 # ---------------------------------------------------------------
-def extract(sentences, idf):
+def extract(sentences, idf, weak_acronyms=None):
     """一篇的 token 句列表 → [(关键词, 综合分)]，综合分降序、5–8 个。
 
     两套候选池取并集按综合分排序，交集词享受 INTERSECTION_BONUS 增益
     （理由见模块 docstring）；候选总量不足 TOP_FLOOR 的短文档从全部
     候选按综合分回填。
+
+    weak_acronyms：缩写假词门槛（方案C）筛出的 token 集，这些词不作
+    单字候选，两个成员都是缩写假词的 bigram 一并丢弃（bo sd 类）。
     """
     uni, bi = _candidates(sentences)
     if not uni:
+        return []
+    weak = weak_acronyms or frozenset()
+    uni = Counter({t: c for t, c in uni.items() if t not in weak})
+    bi = Counter({t: c for t, c in bi.items()
+                  if not all(p in weak for p in t.split(" "))})
+    if not uni and not bi:
         return []
 
     # 候选 = 单词 + 二元短语；tf_idf = tf × idf（二元短语的 df 也按全库算）
@@ -341,7 +371,13 @@ def rebuild_keywords():
     for toks in tokenized:
         uni, bi = _candidates(toks)
         doc_terms.append(set(uni) | set(bi))
+    df = doc_freq(doc_terms)
     idf = compute_idf(doc_terms)
+    # 缩写假词门槛（方案C）：低频短字母 token，白名单豁免方向名
+    weak_acronyms = frozenset(
+        t for t, c in df.items()
+        if len(t) <= ACRONYM_MAX_LEN and t.isalpha()
+        and c <= ACRONYM_MAX_DF and t not in ACRONYM_WHITELIST)
 
     n_with = 0
     links = 0
@@ -349,7 +385,7 @@ def rebuild_keywords():
         execute("DELETE FROM paper_keyword WHERE source = 'extract'",
                 commit=False)
         for (paper_id, _), toks in zip(docs, tokenized):
-            picked = extract(toks, idf)
+            picked = extract(toks, idf, weak_acronyms)
             if not picked:
                 continue
             n_with += 1
@@ -376,3 +412,36 @@ def rebuild_keywords():
         "keywords": query_all("SELECT COUNT(*) AS c FROM keyword")[0]["c"],
         "elapsed_sec": round(time.time() - started, 1),
     }
+
+
+# ---------------------------------------------------------------
+# 统计口径查询（评估报告方案A）—— 功能3/4 的数据源过滤
+# ---------------------------------------------------------------
+# 功能3/4 尚未实现；这两个函数是它们将来要调的查询，DF 门槛在这里
+# 统一收口，阈值取 config（STATS_KEYWORD_MIN_DF / GRAPH_KEYWORD_MIN_DF），
+# 可配置、可回滚（改成 1 即关闭）。论文详情页的关键词标签**不过滤**
+# ——那里展示的是逐篇结果，长尾概念照常显示。
+
+def top_keywords(min_df=3, limit=10):
+    """功能3 Top 热词榜口径：按 DF 降序，DF ≥ min_df 才有上榜资格。"""
+    return [dict(r) for r in query_all(
+        """SELECT k.id, k.name, COUNT(pk.id) AS df
+             FROM keyword k JOIN paper_keyword pk ON pk.keyword_id = k.id
+            GROUP BY k.id
+           HAVING COUNT(pk.id) >= ?
+            ORDER BY df DESC, k.name
+            LIMIT ?""",
+        (min_df, limit),
+    )]
+
+
+def graph_keywords(min_df=5):
+    """功能4 图谱节点口径：DF ≥ min_df 的全部关键词（含 id 供连边）。"""
+    return [dict(r) for r in query_all(
+        """SELECT k.id, k.name, COUNT(pk.id) AS df
+             FROM keyword k JOIN paper_keyword pk ON pk.keyword_id = k.id
+            GROUP BY k.id
+           HAVING COUNT(pk.id) >= ?
+            ORDER BY df DESC""",
+        (min_df,),
+    )]

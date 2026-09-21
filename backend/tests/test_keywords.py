@@ -354,3 +354,120 @@ def test_所有格撇号不产生幽灵关键词(app, db):
                           (stale,)).fetchone()["c"] == 0, f"{stale!r} 是幽灵关键词"
     # llms' 折叠成 llm 后是否成行取决于排序（小语料 tf=1 排不进 Top 8），
     # 这里只断言幽灵行不存在
+
+
+# ---------------------------------------------------------------
+# 方案C：缩写假词门槛 + 弱实词边界表（规则实现，本次不重建真实库）
+# ---------------------------------------------------------------
+def test_缩写假词门槛_白名单豁免(app, db):
+    # ttt / ed：低频短字母缩写 → 应被门槛挡掉
+    _seed(db, "TTT and ED Ablations for Segmentation",
+          "TTT improves segmentation. ED is an ablation on segmentation. "
+          "Segmentation results compare ttt and ed variants on benchmarks.")
+    # clip：同样低频，但在方向名白名单里 → 必须幸存（门槛误杀的直接检验）
+    _seed(db, "CLIP for Zero-Shot Classification",
+          "CLIP enables zero shot classification. CLIP visual encoder "
+          "aligns images with text for classification.")
+
+    with app.app_context():
+        keywords.rebuild_keywords()
+
+    for banned in ("ttt", "ed"):
+        assert db.execute("SELECT COUNT(*) AS c FROM keyword WHERE name_key = ?",
+                          (banned,)).fetchone()["c"] == 0
+    clip_paper = db.execute(
+        "SELECT id FROM paper WHERE title LIKE 'CLIP%'").fetchone()["id"]
+    assert "clip" in _names(db, clip_paper)
+
+
+def test_缩写假词门槛_双缩写bigram一并丢弃(app, db):
+    # 评估报告里的 bo sd：两个缩写拼成的假 bigram，单个缩写都过不了门槛，
+    # 组合体也必须消失（门槛在 bigram 上的传播规则）
+    _seed(db, "Bayesian Optimization Distillation Study",
+          "We call our method BO SD for short. BO SD tunes the pipeline. "
+          "The method bayesian optimization distillation works well on tasks.")
+
+    with app.app_context():
+        keywords.rebuild_keywords()
+
+    assert db.execute("SELECT COUNT(*) AS c FROM keyword WHERE name_key = 'bo sd'"
+                      ).fetchone()["c"] == 0
+
+
+def test_弱实词边界表_单字与碎片一并消失(app, db):
+    # single blurry / size kernel / third kind 是评估报告点名的碎片；
+    # 弱实词进 STOPWORDS 后，旁边真正的概念（blurry image）应能浮现
+    _seed(db, "Detection in the Third Kind",
+          "We study single blurry image detection with a size kernel "
+          "design. The blurry image results and kernel design are strong. "
+          "Additional growth exit analysis follows the kind of tasks.")
+
+    with app.app_context():
+        keywords.rebuild_keywords()
+
+    names = _names(db, db.execute("SELECT id FROM paper").fetchone()["id"])
+    joined = " ".join(names)
+    for banned in ("kind", "growth", "exit", "additional",
+                   "single", "size", "third",
+                   "single blurry", "size kernel", "third kind",
+                   "additional growth", "additional label"):
+        assert banned not in names, f"{banned!r} 应被边界表挡住"
+    assert "blurry image" in joined             # 真概念从碎片旁浮现
+
+
+# ---------------------------------------------------------------
+# 方案A：统计口径查询的 DF 过滤
+# ---------------------------------------------------------------
+def _seed_n(db, title, abstract, n):
+    """同一关键词语料灌 n 篇（DF=n 的来源）。"""
+    for i in range(n):
+        _seed(db, f"{title} Study {i}", f"{abstract} Case {i}.")
+
+
+def test_Top10口径_DF门槛生效(app, db):
+    # alpha 出现在全部 8 篇（DF=8，含跨篇复用）、beta 2 篇、gamma 1 篇
+    _seed_n(db, "Alpha", "alpha method with beta hints and gamma notes.", 5)
+    _seed_n(db, "Beta", "beta model with alpha context and gamma trace.", 2)
+    _seed_n(db, "Gamma", "gamma field with alpha context.", 1)
+
+    with app.app_context():
+        counts = keywords.rebuild_keywords()
+        top = keywords.top_keywords(min_df=3, limit=10)
+        full = keywords.top_keywords(min_df=1, limit=100)
+
+    assert counts["with_keywords"] == 8              # 语料确实抽取成功
+    names = [r["name"] for r in top]
+    assert names[0] == "alpha"                       # DF 最高的居首
+    assert all(r["df"] >= 3 for r in top)            # 口径硬约束
+    assert "beta" not in names and "gamma" not in names   # DF=2/1 被挡
+    assert {"beta", "gamma"} & {r["name"] for r in full}  # 不过滤时它们在
+
+
+def test_图谱口径_节点数显著缩减(app, db):
+    _seed_n(db, "Alpha", "alpha method with beta hints and gamma notes.", 5)
+    _seed_n(db, "Beta", "beta model with alpha context and gamma trace.", 2)
+    _seed_n(db, "Gamma", "gamma field with alpha context.", 1)
+
+    with app.app_context():
+        counts = keywords.rebuild_keywords()
+        all_nodes = keywords.graph_keywords(min_df=1)
+        graph_nodes = keywords.graph_keywords(min_df=5)
+
+    assert counts["keywords"] >= 5
+    # 图谱口径（DF≥5）把长尾挡在门外：节点显著缩减且只留 DF 达标者
+    assert len(graph_nodes) < len(all_nodes) / 2
+    assert all(r["df"] >= 5 for r in graph_nodes)
+    names = {r["name"] for r in graph_nodes}
+    assert "alpha" in names
+    assert "beta" not in names and "gamma" not in names   # DF=2/1 不进图谱
+
+
+def test_统计口径阈值在config且可回滚(app):
+    from flask import current_app
+    with app.app_context():
+        assert current_app.config["STATS_KEYWORD_MIN_DF"] == 3
+        assert current_app.config["GRAPH_KEYWORD_MIN_DF"] == 5
+    # 回滚语义：阈值改成 1 等价于不过滤
+    with app.app_context():
+        rows = keywords.top_keywords(min_df=1, limit=100)
+    assert all(r["df"] >= 1 for r in rows)
