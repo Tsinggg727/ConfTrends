@@ -111,8 +111,9 @@ onMounted(async () => {
   margin: -1.5rem calc(50% - 50vw) 0;
   padding: 1.5rem calc(50vw - 50%) 1.5rem;
   background:
-    radial-gradient(50rem 20rem at 85% -10%, rgba(139, 92, 246, 0.35), transparent 60%),
-    radial-gradient(40rem 18rem at 8% 110%, rgba(59, 130, 246, 0.28), transparent 60%),
+    radial-gradient(50rem 20rem at 85% -10%, rgba(139, 92, 246, 0.38), transparent 60%),
+    radial-gradient(40rem 18rem at 8% 110%, rgba(59, 130, 246, 0.30), transparent 60%),
+    radial-gradient(44rem 20rem at 55% 118%, rgba(139, 124, 208, 0.16), transparent 65%),
     linear-gradient(160deg, #0B1226 0%, #111A35 55%, #1E1B4B 100%);
 }
 .home::before {

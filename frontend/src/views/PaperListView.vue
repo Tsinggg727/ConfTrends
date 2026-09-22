@@ -218,9 +218,6 @@ onMounted(() => {
         </el-button>
 
         <div class="spacer" />
-        <el-button type="danger" plain @click="batchVisible = true">
-          批量删除
-        </el-button>
         <el-button @click="openCreate">＋ 新增</el-button>
       </div>
 
@@ -278,18 +275,23 @@ onMounted(() => {
         </el-table-column>
       </el-table>
 
-      <!-- 分页 -->
-      <el-pagination
-        v-if="total > query.pageSize"
-        class="pager"
-        layout="total, sizes, prev, pager, next"
-        :total="total"
-        :page-sizes="[10, 20, 50]"
-        :page-size="query.pageSize"
-        :current-page="query.page"
-        @current-change="onPageChange"
-        @size-change="onSizeChange"
-      />
+      <!-- 表格底部：批量删除（弱化的次要按钮）+ 分页 -->
+      <div v-if="total" class="table-foot">
+        <el-button size="small" plain @click="batchVisible = true">
+          批量删除
+        </el-button>
+        <el-pagination
+          v-if="total > query.pageSize"
+          class="pager"
+          layout="total, sizes, prev, pager, next"
+          :total="total"
+          :page-sizes="[10, 20, 50]"
+          :page-size="query.pageSize"
+          :current-page="query.page"
+          @current-change="onPageChange"
+          @size-change="onSizeChange"
+        />
+      </div>
 
       <!-- 空态一：有检索词但没查到 → 联网爬取兜底（原型③） -->
       <div v-else-if="missWithQuery" class="empty miss">
@@ -346,8 +348,10 @@ onMounted(() => {
       </p>
       <template #footer>
         <el-button @click="batchVisible = false">取消</el-button>
+        <!-- 未选会议/年份（未选中项）时置灰禁用 -->
         <el-button type="danger" :loading="batchDeleting"
-                   :disabled="batchCount === 0" @click="confirmBatchDelete">
+                   :disabled="(!batchConf && !batchYear) || batchCount === 0"
+                   @click="confirmBatch">
           确认删除 {{ batchCount }} 篇
         </el-button>
       </template>
@@ -414,8 +418,16 @@ onMounted(() => {
   color: #9aa4b2;
 }
 .pager {
-  margin-top: 14px;
+  margin-top: 0;
+  margin-left: auto;
   justify-content: flex-end;
+}
+/* 表格底部操作行：批量删除（弱化）居左，分页靠右 */
+.table-foot {
+  margin-top: 14px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 .empty {
   padding: 30px 0;

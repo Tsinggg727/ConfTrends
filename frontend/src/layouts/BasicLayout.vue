@@ -59,7 +59,21 @@ onMounted(() => {
     <header class="app-header">
       <div class="header-inner">
         <div class="brand" @click="router.push('/')">
-          <span class="brand-icon">🎓</span>
+          <!-- 学位帽 SVG + 品牌渐变（#3B82F6 → #8B5CF6），替代 emoji -->
+          <svg class="brand-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <defs>
+              <linearGradient id="brand-grad" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stop-color="#3B82F6" />
+                <stop offset="1" stop-color="#8B5CF6" />
+              </linearGradient>
+            </defs>
+            <path d="M12 3 2.5 7.5 12 12l9.5-4.5L12 3z" fill="url(#brand-grad)" />
+            <path d="M6.5 10.2v4c0 1.6 2.5 2.9 5.5 2.9s5.5-1.3 5.5-2.9v-4"
+                  fill="none" stroke="url(#brand-grad)" stroke-width="1.7"
+                  stroke-linecap="round" />
+            <path d="M21.5 8.2v4.8" fill="none" stroke="url(#brand-grad)"
+                  stroke-width="1.7" stroke-linecap="round" />
+          </svg>
           <span class="brand-text">顶会热词 <em>ConfTrends</em></span>
         </div>
 
@@ -126,8 +140,21 @@ onMounted(() => {
   position: sticky;
   top: 0;
   z-index: 100;
-  background: var(--ct-navy);
+  /* 深蓝黑 → 深蓝横向渐变（问题4：导航栏不再纯色） */
+  background: linear-gradient(90deg, #0A111F 0%, #0F172A 52%, #16243F 100%);
   box-shadow: 0 2px 12px rgba(15, 23, 42, 0.18);
+}
+/* 底部 1px 极淡主色渐变细线作为分隔 */
+.app-header::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent,
+    rgba(76, 111, 182, 0.55) 28%, rgba(139, 124, 208, 0.45) 72%, transparent);
+  pointer-events: none;
 }
 
 .header-inner {
@@ -150,12 +177,13 @@ onMounted(() => {
   white-space: nowrap;
 }
 .brand-icon {
-  font-size: 22px;
-  line-height: 1;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
 }
 .brand-text em {
   font-style: normal;
-  color: #93c5fd;
+  color: #A78BFA;               /* 淡紫：与首页 Hero 淡紫同族 */
   font-weight: 500;
   font-size: 12px;
 }
@@ -170,26 +198,35 @@ onMounted(() => {
 .nav-link,
 .nav-back {
   padding: 6px 14px;
-  border: 1px solid transparent;
+  border: none;
   border-radius: 8px;
   background: transparent;
   color: #cbd5e1;
   font-size: 14px;
   text-decoration: none;
   cursor: pointer;
-  transition: background 0.2s, color 0.2s, opacity 0.2s;
+  transition: color 0.2s, opacity 0.2s;
 }
+/* 悬停：文字微亮，不加底色方框 */
 .nav-link:hover,
 .nav-back:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #fff;
+  color: #F1F5F9;
 }
-/* 当前页高亮：雾紫玻璃药丸（视觉评审定稿：全站不再出现亮蓝紫渐变） */
+/* 选中：只做文字高亮 —— 淡紫 + 2px 短下划线，无边框无底色块 */
 .nav-link.active {
-  background: rgba(148, 163, 255, 0.16);
-  border-color: rgba(148, 163, 255, 0.35);
-  color: #dbe4ff;
+  color: #A78BFA;
   font-weight: 600;
+}
+.nav-link.active::after {
+  content: "";
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 1px;
+  background: #A78BFA;
+  opacity: 0.75;
 }
 
 /* 后台任务运行中的小圆点角标 */
