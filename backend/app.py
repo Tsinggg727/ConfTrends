@@ -107,4 +107,11 @@ if __name__ == "__main__":
         if recovered:
             print(f"[warn] 已把 {recovered} 个上次未跑完的任务标记为 paused（可从断点续跑）")
 
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    # 部署环境用环境变量覆盖（如 HOST=0.0.0.0 PORT=8000 DEBUG=0）；
+    # 不设置时保持本地开发默认：127.0.0.1:5000 + debug
+    app.run(
+        host=os.environ.get("HOST", "127.0.0.1"),
+        port=int(os.environ.get("PORT", "5000")),
+        debug=os.environ.get("DEBUG", "1") == "1",
+        threaded=True,
+    )
