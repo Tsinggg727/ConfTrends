@@ -2,7 +2,7 @@
 /**
  * 论文详情 —— 原型⑤ 的基础版（功能2「查看」的落点）。
  * 左栏：题目 + 关键词标签（点击回列表按词过滤）+ 摘要；
- * 右栏：会议年份 / 来源 / 原文与 PDF 外链。
+ * 右栏：会议年份 / 来源 / PDF 原文与摘要页外链。
  * 「相关论文」闭环需要相似度计算（功能2统计侧），不在本版范围。
  */
 import { computed, onMounted, ref } from 'vue'
@@ -26,6 +26,9 @@ const venue = computed(() => {
     ? paper.value.conference.name
     : ''
 })
+
+/** 原文 = PDF 直链（爬虫抓详情页时存进 pdf_url）；缺 PDF 的老数据退回摘要页 */
+const pdfLink = computed(() => paper.value?.pdf_url || paper.value?.url || '')
 
 function hostOf(url) {
   try {
@@ -92,10 +95,16 @@ onMounted(async () => {
             <dd>{{ paper.enrich_status }}</dd>
             <dt>原文</dt>
             <dd>
-              <a v-if="paper.url" :href="paper.url" target="_blank" rel="noopener">
-                {{ hostOf(paper.url) }} ↗
+              <a v-if="pdfLink" :href="pdfLink" target="_blank" rel="noopener">
+                {{ hostOf(pdfLink) }} ↗
               </a>
               <span v-else>—</span>
+            </dd>
+            <dt v-if="paper.url">摘要页</dt>
+            <dd v-if="paper.url">
+              <a :href="paper.url" target="_blank" rel="noopener">
+                {{ hostOf(paper.url) }} ↗
+              </a>
             </dd>
             <dt v-if="paper.doi">DOI</dt>
             <dd v-if="paper.doi" class="ct-num">{{ paper.doi }}</dd>

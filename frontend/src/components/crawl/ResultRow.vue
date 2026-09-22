@@ -15,9 +15,11 @@ defineEmits(['ignore', 'retry'])
 const isSuccess = computed(() => props.row.status === 'success')
 const paper = computed(() => props.row.paper || {})
 const abstract = computed(() => paper.value.abstract || '')
+/** 原文 = PDF 直链（爬虫存 pdf_url）；缺 PDF 的老数据退回摘要页链接 */
+const pdfLink = computed(() => paper.value.pdf_url || paper.value.url || '')
 const host = computed(() => {
   try {
-    return new URL(paper.value.url).host
+    return new URL(pdfLink.value).host
   } catch {
     return ''
   }
@@ -66,9 +68,9 @@ const codeLabel = computed(() => props.row.fail_reason || '')
             {{ kw }}
           </el-tag>
           <a
-            v-if="paper.url"
+            v-if="pdfLink"
             class="origin"
-            :href="paper.url"
+            :href="pdfLink"
             target="_blank"
             rel="noopener"
           >

@@ -33,6 +33,7 @@ BASE_SELECT = """
            p.year,
            p.abstract,
            p.url,
+           p.pdf_url,
            p.source,
            p.enrich_status,
            (SELECT GROUP_CONCAT(k.name, ',')
