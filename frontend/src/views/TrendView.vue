@@ -14,7 +14,7 @@ import { getTrend } from '@/api/stats'
 /* 低饱和三色族调色板（视觉评审定稿：哑光金 / 墨蓝 / 雾紫及中性扩展） */
 const PALETTE = ['#C9A85C', '#4C6FB6', '#7B6FC0', '#8F7333', '#3A5590',
   '#9B8CCB', '#B08250', '#64707F', '#AEB6C2', '#7B8A9E']
-const FRAME_MS = 3000                        // 帧间隔 = 动画时长：每 3s 沿轴推进一年（视觉反馈）
+const FRAME_MS = 1500                        // 帧间隔 = 动画时长：每年 1.5 秒
 
 const conferences = ref(['CVPR', 'ICCV', 'ECCV'])
 const topN = ref(10)                         // 曲线数：Top N 热词（传后端 top_n）
@@ -376,7 +376,6 @@ watch(loading, (v) => {
           <el-button size="small" :disabled="!years.length" @click="stepFrame(1)">
             下一帧
           </el-button>
-          <span class="chip ct-num">每年 3 秒</span>
         </div>
       </div>
     </section>
@@ -460,7 +459,7 @@ watch(loading, (v) => {
   background: linear-gradient(90deg, var(--ct-primary), var(--ct-secondary));
   transform: scaleX(0);                        /* 进度用 scaleX 表现，宽度恒定 */
   transform-origin: left;
-  transition: transform 2.8s linear;           /* 与帧间隔(3s)接近，视觉同步 */
+  transition: transform 1.4s linear;          /* 与帧间隔(1.5s)接近，视觉同步 */
 }
 .frame {
   width: 48px;
@@ -478,12 +477,5 @@ watch(loading, (v) => {
 .play-btn {
   padding-left: 24px;
   padding-right: 24px;
-}
-.chip {
-  font-size: 12px;
-  padding: 3px 9px;
-  border-radius: 999px;
-  background: #fff7ed;
-  color: #b45309;
 }
 </style>

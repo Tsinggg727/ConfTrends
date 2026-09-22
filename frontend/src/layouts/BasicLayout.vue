@@ -10,7 +10,7 @@ const route = useRoute()
 const router = useRouter()
 const globalStore = useGlobalStore()
 const crawlStore = useCrawlStore()
-const { year, summary } = storeToRefs(globalStore)
+const { summary } = storeToRefs(globalStore)
 
 /** 导航项，顺序与原型一致 */
 const navItems = [
@@ -31,14 +31,6 @@ const dataBadge = computed(() => {
   return `数据更新：${date} ｜ ${count} 篇`
 })
 
-/** 导航栏年份下拉的可选范围 */
-const yearOptions = computed(() => {
-  const [min, max] = summary.value.year_range || [2022, 2026]
-  const list = []
-  for (let y = max; y >= min; y -= 1) list.push(y)
-  return list.length ? list : [2026, 2025, 2024, 2023, 2022]
-})
-
 function goBack() {
   if (window.history.length > 1) router.back()
   else router.push('/')
@@ -46,9 +38,6 @@ function goBack() {
 
 onMounted(() => {
   globalStore.loadSummary()
-  // 年份默认落到数据的最新一年
-  const [min, max] = summary.value.year_range || []
-  if (max) year.value = max
   // 导航角标：有没有任务在跑，问历史接口最省事（不启动轮询）
   crawlStore.loadHistory()
 })
@@ -104,14 +93,6 @@ onMounted(() => {
         </nav>
 
         <div class="header-right">
-          <el-select
-            v-model="year"
-            size="small"
-            class="year-select"
-            @change="globalStore.setYear"
-          >
-            <el-option v-for="y in yearOptions" :key="y" :label="`年份 ${y}`" :value="y" />
-          </el-select>
           <span class="data-badge ct-num">{{ dataBadge }}</span>
         </div>
       </div>
@@ -183,7 +164,7 @@ onMounted(() => {
 }
 .brand-text em {
   font-style: normal;
-  color: #A78BFA;               /* 淡紫：与首页 Hero 淡紫同族 */
+  color: #A5B4FC;               /* 偏蓝淡紫（低饱和）：与首页 Hero 淡紫同族 */
   font-weight: 500;
   font-size: 12px;
 }
@@ -212,9 +193,9 @@ onMounted(() => {
 .nav-back:hover {
   color: #F1F5F9;
 }
-/* 选中：只做文字高亮 —— 淡紫 + 2px 短下划线，无边框无底色块 */
+/* 选中：只做文字高亮 —— 偏蓝淡紫 + 2px 短下划线，无边框无底色块 */
 .nav-link.active {
-  color: #A78BFA;
+  color: #A5B4FC;
   font-weight: 600;
 }
 .nav-link.active::after {
@@ -225,7 +206,7 @@ onMounted(() => {
   bottom: -1px;
   height: 2px;
   border-radius: 1px;
-  background: #A78BFA;
+  background: #A5B4FC;
   opacity: 0.75;
 }
 
@@ -253,10 +234,6 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 12px;
-}
-
-.year-select {
-  width: 116px;
 }
 
 .data-badge {

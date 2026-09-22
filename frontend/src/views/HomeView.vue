@@ -111,10 +111,11 @@ onMounted(async () => {
   margin: -1.5rem calc(50% - 50vw) 0;
   padding: 1.5rem calc(50vw - 50%) 1.5rem;
   background:
-    radial-gradient(50rem 20rem at 85% -10%, rgba(139, 92, 246, 0.38), transparent 60%),
-    radial-gradient(40rem 18rem at 8% 110%, rgba(59, 130, 246, 0.30), transparent 60%),
-    radial-gradient(44rem 20rem at 55% 118%, rgba(139, 124, 208, 0.16), transparent 65%),
-    linear-gradient(160deg, #0B1226 0%, #111A35 55%, #1E1B4B 100%);
+    /* 光晕式铺满首屏：顶部大晕 + 左下/右下两团柔光，深色基调不变 */
+    radial-gradient(75rem 46rem at 50% -10%, rgba(99, 102, 241, 0.30), transparent 72%),
+    radial-gradient(70rem 44rem at 10% 92%, rgba(59, 130, 246, 0.20), transparent 72%),
+    radial-gradient(80rem 50rem at 94% 94%, rgba(139, 124, 208, 0.20), transparent 75%),
+    #0B1226;
 }
 .home::before {
   content: "";
@@ -237,7 +238,7 @@ onMounted(async () => {
   padding: 0.5rem 1.125rem;
   border-radius: 999px;
   border: none;
-  background: linear-gradient(135deg, var(--ct-primary), var(--ct-secondary));
+  background: linear-gradient(135deg, #5A74AE, #9587C3);
   color: #fff;
   font-size: 0.8125rem;
   transition: transform 0.2s var(--ease), opacity 0.2s var(--ease);

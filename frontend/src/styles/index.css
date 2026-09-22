@@ -32,6 +32,22 @@
   box-shadow: 0 0 0 1px rgba(35, 38, 43, 0.10) inset;
 }
 
+/* 统一渐变底色（低饱和 135° 墨蓝→雾紫）：只作用于实心主色按钮，
+   text / plain / link 形态（如列表行内 查看/编辑）保持透明底 */
+.el-button--primary:not(.is-plain):not(.is-text):not(.is-link) {
+  background: linear-gradient(135deg, #5A74AE, #9587C3);
+}
+.el-checkbox__input.is-checked .el-checkbox__inner,
+.el-checkbox__input.is-indeterminate .el-checkbox__inner {
+  background: linear-gradient(135deg, #5A74AE, #9587C3);
+  border-color: transparent;
+}
+/* radio-button 标签（爬取页 粘贴列表 / 上传 .bib 等）选中态同款渐变 */
+.el-radio-button__original-radio:checked + .el-radio-button__inner {
+  background: linear-gradient(135deg, #5A74AE, #9587C3);
+  border-color: transparent;
+}
+
 /* 全站统一线性图标尺寸（内联 SVG 用） */
 .ic {
   width: 1.125rem;

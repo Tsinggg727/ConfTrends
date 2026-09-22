@@ -227,7 +227,11 @@ onMounted(async () => {
 .conf-code {
   font-size: 2.125rem;
   font-weight: 800;
-  color: var(--ct-primary);
+  /* 会议名渐变字（与首页搜索键同款 135° 墨蓝→雾紫，低饱和） */
+  background: linear-gradient(135deg, #5A74AE, #9587C3);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 .conf-name {
   display: flex;
@@ -240,10 +244,8 @@ onMounted(async () => {
   font-weight: 400;
   font-size: 0.6875rem;
   color: var(--ct-text-weak);
-  max-width: 16rem;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  line-height: 1.5;
+  /* 英文全名较长：自然换行完整显示，不截断 */
 }
 .spacer { flex: 1; }
 .chevron {

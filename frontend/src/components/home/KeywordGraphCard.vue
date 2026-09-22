@@ -10,8 +10,11 @@ import * as echarts from 'echarts'
 
 import { getKeywordGraph, getKeywordPapers } from '@/api/graph'
 
-const TOP1_COLOR = '#C9A85C'   /* 哑光金（视觉评审定稿） */
-const BASE_COLOR = '#4C6FB6'   /* 墨蓝（低饱和主色） */
+/** 全站统一渐变节点底色（首页搜索键同款 135° 墨蓝→雾紫，低饱和） */
+const NODE_GRAD = new echarts.graphic.LinearGradient(0, 0, 1, 1, [
+  { offset: 0, color: '#5A74AE' },
+  { offset: 1, color: '#9587C3' },
+])
 
 const year = ref('total')
 const conference = ref('all')
@@ -91,8 +94,7 @@ function render({ nodes, edges }) {
   if (!chartEl.value || empty.value) return
   if (!chart) chart = echarts.init(chartEl.value)
 
-  // 节点大小 = 热度：heat_norm 0–100 → 半径 12–46；Top1 奖牌色高亮
-  const top1 = nodes.reduce((a, b) => (b.heat_norm > a.heat_norm ? b : a))
+  // 节点大小 = 热度：heat_norm 0–100 → 半径 12–46；底色统一渐变
   chart.setOption({
     tooltip: {
       formatter: (p) => p.dataType === 'node'
@@ -108,7 +110,7 @@ function render({ nodes, edges }) {
         id: String(n.id),
         name: n.name,
         symbolSize: 30 + (n.heat_norm / 100) * 50,
-        itemStyle: { color: n.id === top1.id ? TOP1_COLOR : BASE_COLOR },
+        itemStyle: { color: NODE_GRAD },
         df: n.df,
         heat: n.heat,
         /* 词放在圆圈内（视觉反馈：词入圆内），小节点字号缩小 */
