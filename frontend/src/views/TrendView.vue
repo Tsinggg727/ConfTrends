@@ -19,15 +19,26 @@ const FRAME_MS = 3000                        // 帧间隔 = 动画时长：每 3
 const conferences = ref(['CVPR', 'ICCV', 'ECCV'])
 const topN = ref(10)                         // 曲线数：Top N 热词（传后端 top_n）
 const years = ref([])                        // 窗口内的全部年份（升序）
-const series = ref([])                       // 每词一条：data 按 (year, conference)
 const loading = ref(true)
 
 const frame = ref(0)                         // 当前播放到的年份下标
 const playing = ref(false)
-let timer = null
 
 const chartEl = ref(null)
 let chart = null
+
+/* —— 扫描线动画（需求2/3）：线的呈现由 cutX 驱动 ——
+ * cutX = 线当前画到的 X（年份值，可为小数）。rAF 每帧重算
+ * 「截断到 cutX + 末端插值点」，已画过的段数据不变 = 不重画；
+ * ECharts 自身动画全关（animation:false），杜绝「上下平移」。 */
+let cutX = 0
+let scanRaf = null
+const yMax = ref(0)                          // Y 轴固定上限（需求1）
+const xMin = ref(2022)
+const xMax = ref(2026)
+
+/** 加工后的每词数据：points 按年升序 [{ year, value, confs }] */
+let linesData = []
 
 const confOptions = [
   { value: 'CVPR', label: 'CVPR' },
@@ -38,47 +49,122 @@ const confOptions = [
 const progress = computed(() =>
   years.value.length ? ((frame.value + 1) / years.value.length) * 100 : 0)
 
-/** X 轴固定为全部年份（2022–2026），不随播放帧变化 */
-const xData = computed(() => years.value)
+/** 热度上限向上取整到好看的刻度（Y 轴固定用，需求1） */
+function niceCeil(v) {
+  if (!Number.isFinite(v) || v <= 0) return 10
+  const exp = Math.floor(Math.log10(v))
+  const steps = [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]
+  return ((steps.find((s) => v / 10 ** exp <= s)) ?? 10) * 10 ** exp
+}
 
-/** 第 frame 帧的系列：数据点逐个追加（只含 years[0..frame] 的点）。
- *  每词每年的热度 = 该年各选中会议 heat 之和；tooltip 的会议明细随行携带。 */
-const frameSeries = computed(() => {
-  const n = frame.value + 1
-  const shown = new Set(years.value.slice(0, n))
-  return series.value.map((s) => {
-    const byYear = {}
-    for (const d of s.data) {
-      if (!shown.has(d.year)) continue
-      byYear[d.year] = byYear[d.year] || { total: 0, confs: [] }
-      byYear[d.year].total += d.heat
-      byYear[d.year].confs.push({ conference: d.conference, freq: d.freq, heat: d.heat })
+/** 按 cutX 构造当前 series：line = 落定点 + 末端插值点（从左边点长向
+ *  右边点，需求2）；scatter = 已落定的点（cut 扫过哪年哪年现点）。
+ *  数值轴下空年没有占位点，线自动跨过（单选双年会自然连线）。 */
+function buildSeries() {
+  return linesData.flatMap((l) => {
+    const seg = []
+    const dots = []
+    let prev = null                        // 上一个已落定实点 { x, v }
+    for (const pt of l.points) {
+      if (pt.year <= cutX) {
+        const item = { value: [pt.year, pt.value], confs: pt.confs }
+        seg.push(item)
+        dots.push(item)
+        prev = { x: pt.year, v: pt.value }
+      } else {
+        if (prev) {
+          const f = (cutX - prev.x) / (pt.year - prev.x)
+          seg.push({ value: [cutX, prev.v + (pt.value - prev.v) * f], confs: pt.confs })
+        }
+        break
+      }
     }
-    return {
-      name: s.name,
-      type: 'line',
-      smooth: true,
-      symbolSize: 7,
-      data: years.value.slice(0, n).map((y) => byYear[y]
-        ? { value: Number(byYear[y].total.toFixed(1)), confs: byYear[y].confs }
-        : { value: 0, confs: [] }),
-      lineStyle: { width: 2.4 },
-      emphasis: { focus: 'series' },
-    }
+    return [
+      {
+        name: l.name,
+        type: 'line',
+        smooth: true,
+        showSymbol: false,
+        symbolSize: 0,
+        data: seg,
+        color: l.color,
+        lineStyle: { width: 2.4, color: l.color },
+        emphasis: { focus: 'series' },
+      },
+      {
+        name: l.name,
+        type: 'scatter',
+        data: dots,
+        symbolSize: 7,
+        color: l.color,
+        itemStyle: { color: l.color },
+        silent: true,
+        z: 3,
+      },
+    ]
   })
-})
+}
 
-async function render(replaceSeries = false) {
+function applyDisplay() {
+  if (!chart) return
+  chart.setOption({ series: buildSeries() })
+}
+
+function cancelScan() {
+  if (scanRaf) {
+    cancelAnimationFrame(scanRaf)
+    scanRaf = null
+  }
+}
+
+/** 线从当前 cutX 延伸到 targetX：只有末端插值点在动，旧段静止（需求3）。
+ *  onDone：本段长完后的回调（播放循环用它衔接下一段）。 */
+function scanTo(targetX, dur = FRAME_MS, onDone = null) {
+  cancelScan()
+  const fromX = cutX
+  if (targetX <= fromX) {
+    cutX = targetX
+    applyDisplay()
+    onDone?.()
+    return
+  }
+  const start = performance.now()
+  const ease = (t) => 1 - Math.pow(1 - t, 3)     // cubicOut，与原节奏一致
+  const tick = (now) => {
+    const t = Math.min((now - start) / dur, 1)
+    cutX = fromX + (targetX - fromX) * ease(t)
+    applyDisplay()
+    if (t < 1) scanRaf = requestAnimationFrame(tick)
+    else onDone?.()
+  }
+  scanRaf = requestAnimationFrame(tick)
+}
+
+/** 帧推进：向前 = 扫描延伸；向后/跳帧 = 瞬间到位（不重放整线） */
+function transitionTo(i, onDone = null) {
+  frame.value = Math.max(0, Math.min(years.value.length - 1, i))
+  const targetX = years.value[frame.value]
+  if (targetX == null) {
+    onDone?.()
+    return
+  }
+  if (targetX >= cutX) scanTo(targetX, FRAME_MS, onDone)
+  else {
+    cancelScan()
+    cutX = targetX
+    applyDisplay()
+    onDone?.()
+  }
+}
+
+async function startChart() {
   if (!chartEl.value) return
   if (!chart) chart = echarts.init(chartEl.value)
   await nextTick()   // 等布局生效（v-show 刚翻转时容器可能还没完成布局）
   chart.resize()     // 容器尺寸可能已变化，重测后再绘制
   chart.setOption({
     color: PALETTE,
-    animationDuration: 3000,
-    animationEasing: 'cubicOut',
-    animationDurationUpdate: 3000,
-    animationEasingUpdate: 'cubicOut',
+    animation: false,   // 自带动画全关（会「上下平移」）：呈现由扫描线驱动
     grid: { left: 56, right: 24, top: 36, bottom: 40 },
     tooltip: {
       trigger: 'axis',
@@ -86,16 +172,19 @@ async function render(replaceSeries = false) {
       borderWidth: 0,
       textStyle: { color: '#fff', fontSize: 12 },
       formatter: (params) => {
-        const year = params[0]?.axisValue ?? ''
+        const year = Math.round(params[0]?.axisValue ?? 0)
         let html = `<b>${year} 年</b>`
         for (const p of params) {
+          if (p.seriesType !== 'line') continue    // 点与线同名成对，tooltip 只取线
+          const v = Array.isArray(p.value) ? p.value[1] : p.value
+          if (v == null) continue
           const confs = p.data.confs || []
           const detail = confs.length
             ? confs.map((c) => `${c.conference} ${c.heat}`).join(' / ')
             : '无数据'
           html += `<div style="display:flex;justify-content:space-between;gap:16px;">` +
             `<span>${p.marker} ${p.seriesName}</span>` +
-            `<span style="margin-left:auto;">${p.value}</span></div>` +
+            `<span style="margin-left:auto;">${v}</span></div>` +
             `<div style="color:#93C5FD;font-size:11px;margin-left:18px;">${detail}</div>`
         }
         return html
@@ -109,50 +198,55 @@ async function render(replaceSeries = false) {
       textStyle: { fontSize: 12 },
     },
     xAxis: {
-      type: 'category',
-      boundaryGap: false,
-      data: xData.value,
+      type: 'value',      // 数值轴：末端插值点可落在年份之间（线连续生长）
+      min: xMin.value,
+      max: xMax.value,
+      interval: 1,
       axisLine: { lineStyle: { color: '#E2E8F0' } },
-      axisLabel: { color: '#6B7280' },
+      axisLabel: { color: '#6B7280', formatter: (v) => `${v}` },
     },
     yAxis: {
       type: 'value',
       name: '热度',
+      min: 0,
+      max: yMax.value || null,   // 固定上限：所有年份共用同一刻度（需求1）
       nameTextStyle: { color: '#9AA4B2' },
       splitLine: { lineStyle: { color: '#F1F5F9' } },
       axisLabel: { color: '#6B7280' },
     },
-    series: frameSeries.value,
-  },
-  // 合并式更新：只增量变更 series 数据，动画表现为「沿 X 轴追加生长」；
-  // replaceSeries=true 时（重载/切换口径）整体替换，清掉不再存在的旧系列
-  replaceSeries ? { replaceMerge: ['series'] } : undefined)
+    series: [],
+  }, true)   // notMerge：重载/切换口径后旧系列整体清掉
+  cancelScan()
+  cutX = xMin.value
+  applyDisplay()
+  // 初始加载：线从 2022 出发沿 X 轴生长到 2026（需求2）
+  if (years.value.length > 1) scanTo(xMax.value, FRAME_MS)
 }
 
 // ---------- 播放控制 ----------
-function setFrame(i) {
-  frame.value = Math.max(0, Math.min(years.value.length - 1, i))
+/** 播完一段接下一段：扫描自链式调度，不与动画抢跑 */
+function playNext() {
+  if (!playing.value) return
+  if (frame.value >= years.value.length - 1) {
+    playing.value = false          // 最后一段已长满，自动收停
+    return
+  }
+  transitionTo(frame.value + 1, playNext)
 }
 
 function stepFrame(delta) {
   if (playing.value) togglePlay()
-  setFrame(frame.value + delta)
+  transitionTo(frame.value + delta)
 }
 
 function togglePlay() {
   playing.value = !playing.value
   if (playing.value) {
-    if (frame.value >= years.value.length - 1) setFrame(0)   // 从头播
-    timer = setInterval(() => {
-      if (frame.value >= years.value.length - 1) {
-        togglePlay()
-        return
-      }
-      setFrame(frame.value + 1)
-    }, FRAME_MS)
-  } else if (timer) {
-    clearInterval(timer)
-    timer = null
+    // 从头播，或从冻结处补完当前段再链下一段
+    if (frame.value >= years.value.length - 1) transitionTo(0, playNext)
+    else transitionTo(frame.value, playNext)
+  } else {
+    cancelScan()                       // 手动暂停：线冻结在当前延伸位置
   }
 }
 
@@ -160,7 +254,7 @@ function seekFromTrack(event) {
   const rect = event.currentTarget.getBoundingClientRect()
   const ratio = (event.clientX - rect.left) / rect.width
   if (playing.value) togglePlay()
-  setFrame(Math.round(ratio * (years.value.length - 1)))
+  transitionTo(Math.round(ratio * (years.value.length - 1)))
 }
 
 async function load() {
@@ -171,10 +265,32 @@ async function load() {
       top_n: topN.value,
     })
     years.value = data.years
-    series.value = data.series
+    xMin.value = data.years[0] ?? 2022
+    xMax.value = data.years[data.years.length - 1] ?? 2026
+
+    // 聚合每词每年：同一年多会议 heat 求和，会议明细随行（tooltip 用）
+    linesData = (data.series || []).map((s, si) => {
+      const byYear = {}
+      for (const d of s.data) {
+        byYear[d.year] = byYear[d.year] || { total: 0, confs: [] }
+        byYear[d.year].total += d.heat
+        byYear[d.year].confs.push({ conference: d.conference, freq: d.freq, heat: d.heat })
+      }
+      const points = Object.keys(byYear).map(Number).sort((a, b) => a - b)
+        .map((y) => ({
+          year: y,
+          value: Number(byYear[y].total.toFixed(1)),
+          confs: byYear[y].confs,
+        }))
+      return { name: s.name, color: PALETTE[si % PALETTE.length], points }
+    })
+
+    // Y 轴固定上限：全量数据的最大热度（需求1，不随帧缩放）
+    let m = 0
+    for (const l of linesData) for (const p of l.points) m = Math.max(m, p.value)
+    yMax.value = niceCeil(m)
+
     frame.value = years.value.length ? years.value.length - 1 : 0
-    await nextTick()
-    render()
   } finally {
     loading.value = false
   }
@@ -190,15 +306,14 @@ onMounted(async () => {
 })
 onUnmounted(() => {
   window.removeEventListener('resize', onResize)
-  if (timer) clearInterval(timer)
+  cancelScan()
   chart?.dispose()
   chart = null
 })
 watch([conferences, topN], load)
 watch(loading, (v) => {
-  if (!v) render(true)          // 新语料加载完成：整体替换（清掉旧关键词系列）
+  if (!v) startChart()          // 新语料加载完成：固定坐标轴并从左往右生长
 })
-watch(frameSeries, () => render())   // 播放/追加帧：合并式增量更新
 </script>
 
 <template>
