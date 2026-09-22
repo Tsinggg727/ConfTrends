@@ -12,8 +12,13 @@
 import os
 
 from flask import Flask, jsonify, send_from_directory
-from flask_cors import CORS
 from werkzeug.exceptions import NotFound
+
+try:
+    from flask_cors import CORS
+except ImportError:
+    # 部署环境（如 PythonAnywhere）可不装 flask-cors：生产同域托管用不到跨域
+    CORS = None
 
 from api import register_blueprints
 from config import Config
@@ -31,8 +36,9 @@ def create_app(config_class=Config):
     app.config.from_object(config_class)
     app.json.ensure_ascii = False          # 中文直接输出，不转义成 \uXXXX
 
-    # 开发期前端跑在 5173，跨域放行 /api/*；生产同域托管后此放行无副作用
-    CORS(app, resources={r"/api/*": {"origins": "*"}})
+    # 开发期前端跑在 5173，跨域放行 /api/*；生产同域托管后不需要跨域放行
+    if CORS is not None:
+        CORS(app, resources={r"/api/*": {"origins": "*"}})
 
     register_db(app)
     register_blueprints(app)
