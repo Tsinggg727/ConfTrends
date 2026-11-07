@@ -34,3 +34,7 @@ venv/
 *.out
 *.db-shm
 *.db-wal
+
+# 编译产物
+*.class
+*.jar
